@@ -109,6 +109,13 @@ def fix_ci_name(repo):
     return "ci: rename tests workflow to ci.yml"
 
 
+def fix_ruff(repo):
+    path = repo / "pyproject.toml"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.rstrip("\n") + "\n\n[tool.ruff]\nline-length = 100\n", encoding="utf-8")
+    return "chore: add ruff config"
+
+
 def wheel_files(repo, out):
     """Build a wheel into out and return its file names, without the dist-info metadata."""
     done = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(out), str(repo)], capture_output=True, text=True)
@@ -205,8 +212,15 @@ def findings(repo, info):
     if (workflows / "tests.yml").exists() and not (workflows / "ci.yml").exists():
         yield "tests.yml should be ci.yml", lambda: fix_ci_name(repo)
 
+    if workflows.is_dir() and any(workflows.glob("*.yml")):
+        lint = run("uvx", "--quiet", "--from", "actionlint-py", "actionlint", "-oneline", cwd=repo).strip()
+        if lint:
+            yield f"actionlint: {lint.splitlines()[0]}", None
+
     pyproject = repo / "pyproject.toml"
     if pyproject.exists():
+        if "[tool.ruff" not in pyproject.read_text(encoding="utf-8"):
+            yield "no [tool.ruff] in pyproject.toml", lambda: fix_ruff(repo)
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
         if backend and backend[1] != "uv_build":
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
