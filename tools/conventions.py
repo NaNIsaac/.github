@@ -9,8 +9,12 @@ uncommitted changes. Rules that need judgement are reported, not fixed.
 
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import tomllib
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -105,6 +109,67 @@ def fix_ci_name(repo):
     return "ci: rename tests workflow to ci.yml"
 
 
+def wheel_files(repo, out):
+    """Build a wheel into out and return its file names, without the dist-info metadata."""
+    done = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(out), str(repo)], capture_output=True, text=True)
+    wheels = list(Path(out).glob("*.whl"))
+    if done.returncode or not wheels:
+        return None
+    with zipfile.ZipFile(wheels[0]) as z:
+        return {n for n in z.namelist() if ".dist-info/" not in n and not n.endswith("/")}
+
+
+def rewrite_tables(text, tables):
+    """Replace or drop whole TOML tables, keyed by header line; everything else stays byte for byte."""
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skipping = stripped in tables
+            if skipping:
+                out.append(tables[stripped])
+                continue
+        elif skipping and not stripped:
+            skipping = False
+            continue
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
+def fix_uv_build(repo):
+    """Switch hatchling/setuptools to uv_build when the wheel stays identical; otherwise leave it."""
+    path = repo / "pyproject.toml"
+    text = path.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    module = data["project"]["name"].replace("-", "_").lower()
+    tool = data.get("tool", {})
+    hatch = tool.get("hatch", {})
+    wheel_packages = hatch.get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [f"src/{module}"])
+    if not (repo / "src" / module / "__init__.py").exists() or "setuptools" in tool:
+        print(f"{repo.name}: uv_build skipped, not a plain src/{module} package")
+        return None
+    if wheel_packages != [f"src/{module}"] or set(hatch) - {"build"}:
+        print(f"{repo.name}: uv_build skipped, custom hatch build settings")
+        return None
+    version = run("uv", "--version").split()[1]
+    minor = int(version.split(".")[1])
+    new = rewrite_tables(text, {
+        "[build-system]": f'[build-system]\nrequires = ["uv_build>={version},<0.{minor + 1}"]\nbuild-backend = "uv_build"\n\n',
+        "[tool.hatch.build.targets.wheel]": "",
+        "[tool.hatch.build.targets.sdist]": "",
+    })
+    with tempfile.TemporaryDirectory() as tmp:
+        before = wheel_files(repo, Path(tmp) / "before")
+        path.write_text(new, encoding="utf-8")
+        after = wheel_files(repo, Path(tmp) / "after")
+    if before is None or after != before:
+        git(repo, "checkout", "--", "pyproject.toml")
+        print(f"{repo.name}: uv_build reverted, " + ("current build fails" if before is None else "wheel contents differ"))
+        return None
+    return "build: switch to uv_build"
+
+
 def findings(repo, info):
     """Yield (message, fix) pairs; fix is a zero-argument callable or None."""
     name = repo.name
@@ -144,7 +209,7 @@ def findings(repo, info):
     if pyproject.exists():
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
         if backend and backend[1] != "uv_build":
-            yield f"build backend is {backend[1]}, not uv_build", None
+            yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
 
     readme = repo / "README.md"
     if not readme.exists():
@@ -158,6 +223,8 @@ def findings(repo, info):
 
 def selftest():
     assert hangul_ratio("hello") == 0 and hangul_ratio("한글 abc") > 0.3
+    src = "[a]\nx = 1\n\n[b]\ny = 2\n\n[c]\nz = 3\n"
+    assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
 
 
@@ -190,9 +257,11 @@ def main(argv):
         for fix in fixes:
             before = set(git(repo, "status", "--porcelain").splitlines())
             subject = fix()
+            if subject is None:
+                continue
             after = set(git(repo, "status", "--porcelain").splitlines()) - before
             touched = [line[3:].split(" -> ")[-1].strip('"') for line in after]
-            if any(not re.match(r"(LICENSE|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/workflows/)", p) for p in touched):
+            if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/workflows/)", p) for p in touched):
                 # eol normalization rewrote other files; undo, a tree this noisy needs a manual look
                 git(repo, "reset", "-q", "--hard")
                 git(repo, "clean", "-fdq", "--", "LICENSE", ".gitattributes", ".mailmap")
