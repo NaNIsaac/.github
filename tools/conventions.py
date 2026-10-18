@@ -109,6 +109,23 @@ def fix_ci_name(repo):
     return "ci: rename tests workflow to ci.yml"
 
 
+DEPENDABOT = """version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+"""
+
+
+def fix_dependabot(repo):
+    (repo / ".github" / "dependabot.yml").write_text(DEPENDABOT, encoding="utf-8")
+    return "ci: update github actions monthly with dependabot"
+
+
 def fix_ruff(repo):
     path = repo / "pyproject.toml"
     text = path.read_text(encoding="utf-8")
@@ -213,6 +230,8 @@ def findings(repo, info):
         yield "tests.yml should be ci.yml", lambda: fix_ci_name(repo)
 
     if workflows.is_dir() and any(workflows.glob("*.yml")):
+        if not (repo / ".github" / "dependabot.yml").exists():
+            yield "workflows without .github/dependabot.yml", lambda: fix_dependabot(repo)
         lint = run("uvx", "--quiet", "--from", "actionlint-py", "actionlint", "-oneline", cwd=repo).strip()
         if lint:
             yield f"actionlint: {lint.splitlines()[0]}", None
@@ -275,7 +294,7 @@ def main(argv):
                 continue
             after = set(git(repo, "status", "--porcelain").splitlines()) - before
             touched = [line[3:].split(" -> ")[-1].strip('"') for line in after]
-            if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/workflows/)", p) for p in touched):
+            if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/(workflows/|dependabot\.yml))", p) for p in touched):
                 # eol normalization rewrote other files; undo, a tree this noisy needs a manual look
                 git(repo, "reset", "-q", "--hard")
                 git(repo, "clean", "-fdq", "--", "LICENSE", ".gitattributes", ".mailmap")
