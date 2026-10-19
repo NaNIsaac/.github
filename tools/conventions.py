@@ -126,6 +126,58 @@ def fix_dependabot(repo):
     return "ci: update github actions monthly with dependabot"
 
 
+LINT_WORKFLOW = """name: lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx ruff@{version} check
+"""
+
+
+def baseline_table(rules):
+    lines = ["", "# violations present when ruff became mandatory in CI; remove entries as they are fixed",
+             "[tool.ruff.lint.extend-per-file-ignores]"]
+    lines += [f"{json.dumps(f, ensure_ascii=False)} = {json.dumps(sorted(c))}" for f, c in sorted(rules.items())]
+    return "\n".join(lines) + "\n"
+
+
+def fix_lint(repo):
+    """Make ruff mandatory in CI: existing violations become a per-file baseline, new ones fail the build."""
+    path = repo / "pyproject.toml"
+    text = path.read_text(encoding="utf-8")
+    if "extend-per-file-ignores" in text:
+        print(f"{repo.name}: lint skipped, per-file-ignores already configured")
+        return None
+    version = run("uvx", "ruff", "--version").split()[1]
+    raw = run("uvx", f"ruff@{version}", "check", "--no-cache", "--output-format", "json", cwd=repo)
+    found = json.loads(raw or "[]")
+    if any(item["code"] is None for item in found):
+        print(f"{repo.name}: lint skipped, syntax errors ruff cannot ignore")
+        return None
+    rules = {}
+    for item in found:
+        rel = Path(item["filename"]).resolve().relative_to(repo.resolve()).as_posix()
+        rules.setdefault(rel, set()).add(item["code"])
+    workflow = repo / ".github" / "workflows" / "lint.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(LINT_WORKFLOW.format(version=version), encoding="utf-8")
+    if rules:
+        path.write_text(text.rstrip("\n") + "\n" + baseline_table(rules), encoding="utf-8")
+    if subprocess.run(["uvx", f"ruff@{version}", "check", "--no-cache"], cwd=repo, capture_output=True).returncode:
+        git(repo, "checkout", "--", "pyproject.toml")
+        workflow.unlink()
+        print(f"{repo.name}: lint reverted, ruff still fails with the baseline")
+        return None
+    return "ci: run ruff on every push"
+
+
 def fix_ruff(repo):
     path = repo / "pyproject.toml"
     text = path.read_text(encoding="utf-8")
@@ -240,6 +292,8 @@ def findings(repo, info):
     if pyproject.exists():
         if "[tool.ruff" not in pyproject.read_text(encoding="utf-8"):
             yield "no [tool.ruff] in pyproject.toml", lambda: fix_ruff(repo)
+        if not (repo / ".github" / "workflows" / "lint.yml").exists():
+            yield "ruff is not enforced in CI (no lint.yml)", lambda: fix_lint(repo)
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
         if backend and backend[1] != "uv_build":
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
@@ -258,6 +312,7 @@ def selftest():
     assert hangul_ratio("hello") == 0 and hangul_ratio("한글 abc") > 0.3
     src = "[a]\nx = 1\n\n[b]\ny = 2\n\n[c]\nz = 3\n"
     assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
+    assert baseline_table({"a.py": {"F841", "F401"}}).endswith('["F401", "F841"]\n')
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
 
 
@@ -288,11 +343,11 @@ def main(argv):
             print(f"{name}: uncommitted changes, fixes skipped")
             continue
         for fix in fixes:
-            before = set(git(repo, "status", "--porcelain").splitlines())
+            before = set(git(repo, "status", "--porcelain", "-uall").splitlines())
             subject = fix()
             if subject is None:
                 continue
-            after = set(git(repo, "status", "--porcelain").splitlines()) - before
+            after = set(git(repo, "status", "--porcelain", "-uall").splitlines()) - before
             touched = [line[3:].split(" -> ")[-1].strip('"') for line in after]
             if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/(workflows/|dependabot\.yml))", p) for p in touched):
                 # eol normalization rewrote other files; undo, a tree this noisy needs a manual look
