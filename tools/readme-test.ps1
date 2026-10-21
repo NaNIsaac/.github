@@ -19,8 +19,9 @@ $lines = Get-Content -Encoding utf8 $Readme
 
 # Every block runs in a new process, so a PATH or profile change counts only if it was really saved.
 function Update-Path {
+    # keep the current PATH too: the runner adds tools such as uv to it outside the registry
     $env:PATH = if ($IsWindows) {
-        [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH', 'User')
+        [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + $env:PATH
     } else { "$HOME/.local/bin:$env:PATH" }
 }
 
