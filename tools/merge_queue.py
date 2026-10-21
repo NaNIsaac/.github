@@ -10,7 +10,8 @@ what its author says, so an agent cannot argue a PR into a lower tier:
     low      README/docs Markdown, added tests, new workflow files: skim and merge
     medium   lock files, changed or removed workflow steps, removed test lines,
              pyproject, scripts and examples, anything not recognised
-    physics  any other change under src/: read the diff
+    physics  code anywhere outside tests, examples, scripts, benchmarks and tools (src/,
+             or a script at the root such as sim.py): read the diff
 
 When a file fits no rule it lands in a higher tier, never a lower one. Only low-tier PRs that
 are green, mergeable, not stale and not stacked on an open PR get a printed
@@ -37,6 +38,10 @@ DOC = re.compile(
 TEST = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$")
 WORKFLOW = re.compile(r"^\.github/workflows/")
 SOURCE = re.compile(r"^src/")
+# Code that is not a test or a helper can change results, wherever it sits (sim.py at the
+# root of a research repo is as much physics as src/).
+CODE = re.compile(r"\.(py|pyx|rs|c|cc|cpp|h|hpp|cu|cuh|js|ts|jl|m|f90)$", re.I)
+HELPER = re.compile(r"^(examples|scripts|benchmarks|tools|notebooks)/")
 PRE_MERGE = re.compile(r"^\s*pre-merge:\s*(.+)$", re.M | re.I)
 
 
@@ -57,7 +62,7 @@ def file_tier(change: FileChange) -> str:
         return "low" if not change.removed_lines else "medium"
     if WORKFLOW.search(path):
         return "low" if change.status == "added" else "medium"
-    if SOURCE.search(path):
+    if SOURCE.search(path) or (CODE.search(path) and not HELPER.search(path)):
         return "physics"
     return "medium"
 
@@ -299,6 +304,8 @@ def selftest():
     assert tier(("tests/test_x.py", "modified", ["    assert x == 1"])) == "medium"
     assert tier("uv.lock") == tier("pyproject.toml") == tier("examples/run.py") == "medium"
     assert tier("src/pkg/core.py") == "physics" and tier("README.md", "src/a.py") == "physics"
+    assert tier("sim.py") == tier("engine/collide.py") == "physics"
+    assert tier("scripts/run.py") == tier("benchmarks/perf.py") == "medium"
     # The invariant: a file the rules do not know never lowers a PR, and adding any file
     # can only keep or raise the tier.
     for path in ("Makefile", "data/x.h5", "src", "notebooks/a.ipynb", "setup.cfg"):
