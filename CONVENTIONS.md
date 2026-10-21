@@ -19,6 +19,7 @@ Rules that are cheap to follow and cost nothing to keep. `python tools/conventio
 - CI runs `ruff check` and `ruff format --check`. (checked)
 - Type hints on public functions. No type checker is required yet.
 - `uv.lock` is committed. (checked)
+- The build backend is `uv_build`, except in a repo with a Termux CI job (`termux.yml`): uv_build cannot be built from source on Android, so `pip install .` fails there and such a repo keeps hatchling. (checked)
 - A package with `src/` has `tests/` run by pytest in CI. (checked)
 - `requires-python` is the lowest version CI actually tests. Packages published to PyPI do not use a pre-release bound.
 

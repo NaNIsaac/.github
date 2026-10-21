@@ -302,7 +302,10 @@ def findings(repo, info):
         if not (repo / ".github" / "workflows" / "lint.yml").exists():
             yield "ruff is not enforced in CI (no lint.yml)", lambda: fix_lint(repo)
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
-        if backend and backend[1] != "uv_build":
+        # uv_build has no Android wheel and needs Rust to build there, so `pip install .`
+        # fails in Termux; a repo tested in Termux keeps its pure-Python backend.
+        termux = (repo / ".github" / "workflows" / "termux.yml").exists()
+        if backend and backend[1] != "uv_build" and not termux:
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
         lint = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("ruff", {}).get("lint", {})
         missing = RUFF_RULES - set(lint.get("select", [])) - set(lint.get("extend-select", []))
