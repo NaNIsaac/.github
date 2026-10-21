@@ -28,6 +28,11 @@ LEGACY_EMAILS = (
 )
 OWN_FORKS = {"NaNIsaac.github.io"}
 NO_LICENSE = {".github", "NaNIsaac", "Life"}
+NO_COMMIT_FORMAT = {"Life"}
+RUFF_RULES = {"I", "UP", "B"}
+COMMIT_SUBJECT = re.compile(
+    r"(feat|fix|docs|test|chore|ci|build|style|refactor|perf)(\([\w./-]+\))?!?: \S"
+)
 AI_TRAILER = r"co-authored-by:.*(claude|anthropic)|generated with.*claude"
 
 MIT = """MIT License
@@ -297,6 +302,21 @@ def findings(repo, info):
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
         if backend and backend[1] != "uv_build":
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
+        lint = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("ruff", {}).get("lint", {})
+        missing = RUFF_RULES - set(lint.get("select", [])) - set(lint.get("extend-select", []))
+        if "[tool.ruff" in pyproject.read_text(encoding="utf-8") and missing:
+            yield f"ruff lint does not select {', '.join(sorted(missing))}", None
+        lint_yml = repo / ".github" / "workflows" / "lint.yml"
+        if lint_yml.exists() and "ruff@" in lint_yml.read_text(encoding="utf-8") and "format" not in lint_yml.read_text(encoding="utf-8"):
+            yield "lint.yml does not run ruff format --check", None
+        if not (repo / "uv.lock").exists():
+            yield "no uv.lock", None
+        if (repo / "src").is_dir() and not (repo / "tests").is_dir():
+            yield "src/ without tests/", None
+
+    bad = [] if name in NO_COMMIT_FORMAT else [s for s in git(repo, "log", "-n", "20", "--no-merges", "--format=%s").splitlines() if not COMMIT_SUBJECT.match(s) or len(s) > 100]
+    if bad:
+        yield f"{len(bad)} of the last 20 commits break the subject format, e.g. {bad[0]!r}", None
 
     readme = repo / "README.md"
     if not readme.exists():
@@ -313,6 +333,7 @@ def selftest():
     src = "[a]\nx = 1\n\n[b]\ny = 2\n\n[c]\nz = 3\n"
     assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
     assert baseline_table({"a.py": {"F841", "F401"}}).endswith('["F401", "F841"]\n')
+    assert COMMIT_SUBJECT.match("fix(term): keep the hook") and not COMMIT_SUBJECT.match("Fix the hook")
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
 
 
