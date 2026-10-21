@@ -1,7 +1,7 @@
 """The merge digest for Isaac: every open PR in the NaNIsaac account, by repo, with a risk tier.
 
     python merge_queue.py                    # print the digest
-    python merge_queue.py --write PATH       # refresh sections 4-5 of PATH, keep the rest
+    python merge_queue.py --write PATH       # refresh the marked block of PATH, keep the rest
     python merge_queue.py selftest
 
 It never merges. The tier is computed from which files a PR touches and how, never from
@@ -224,8 +224,7 @@ def ready(p: PullRequest) -> bool:
 
 def digest(prs: list[PullRequest]) -> str:
     out = [
-        f"## 4. 저장소별 (자동 생성 {datetime.now():%Y-%m-%d %H:%M}, "
-        "`.github/tools/merge_queue.py`)",
+        f"## 저장소별 (자동 생성 {datetime.now():%Y-%m-%d %H:%M}, `.github/tools/merge_queue.py`)",
         "",
     ]
     out.append(
@@ -260,7 +259,7 @@ def digest(prs: list[PullRequest]) -> str:
                 )
         out.append("")
     out.append(
-        "## 5. low 등급 중 바로 merge 할 수 있는 것 "
+        "## low 등급 중 바로 merge 할 수 있는 것 "
         "(Isaac 이 훑어본 뒤 실행, 스크립트는 실행하지 않음)"
     )
     out.append("")
@@ -269,12 +268,23 @@ def digest(prs: list[PullRequest]) -> str:
     return "\n".join(out)
 
 
+BEGIN, END = "<!-- merge_queue.py:begin -->", "<!-- merge_queue.py:end -->"
+
+
+def replace_generated(text: str, body: str) -> str:
+    """The text with the block between the markers replaced by `body`, or `body` appended
+    when there are no markers yet. Everything outside the markers is hand-written (orders
+    the script cannot know, decisions for Isaac) and stays as it is, whatever its headings."""
+    block = f"{BEGIN}\n{body.rstrip()}\n{END}\n"
+    start, end = text.find(BEGIN), text.find(END)
+    if start != -1 and end > start:
+        return text[:start] + block + text[end + len(END) :].lstrip("\n")
+    return text.rstrip() + "\n\n" + block
+
+
 def write(path: Path, body: str) -> None:
-    """Replaces only the generated sections 4 and 5; hand-written sections (orders the
-    script cannot know, decisions for Isaac) stay as they are."""
-    text = path.read_text(encoding="utf-8") if path.exists() else "# MERGE QUEUE\n\n"
-    kept = re.sub(r"^## [45]\. .*?(?=^## |\Z)", "", text, flags=re.M | re.S).rstrip()
-    path.write_text(kept + "\n\n" + body, encoding="utf-8")
+    text = path.read_text(encoding="utf-8") if path.exists() else "# MERGE QUEUE\n"
+    path.write_text(replace_generated(text, body), encoding="utf-8")
 
 
 def selftest():
@@ -313,6 +323,11 @@ def selftest():
     link([a, c])
     commands = [line for line in digest([a, c]).splitlines() if line.startswith("gh pr merge")]
     assert commands == [f"gh pr merge 1 -R {OWNER}/r --rebase --delete-branch"], commands
+    hand = "# Q\n\n## 0. by hand\nkeep\n\n## 4. also by hand\nkeep too\n"
+    once = replace_generated(hand, "## generated\nv1\n")
+    twice = replace_generated(once + "\n## 9. added later by hand\nstay\n", "## generated\nv2\n")
+    assert "v1" not in twice and "v2" in twice and twice.count(BEGIN) == 1
+    assert all(s in twice for s in ("## 0. by hand", "## 4. also by hand", "## 9. added later"))
     print("selftest ok")
 
 
