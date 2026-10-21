@@ -34,6 +34,8 @@ COMMIT_SUBJECT = re.compile(
     r"(feat|fix|docs|test|chore|ci|build|style|refactor|perf)(\([\w./-]+\))?!?: \S"
 )
 AI_TRAILER = r"co-authored-by:.*(claude|anthropic)|generated with.*claude"
+SETUP_HEADING = re.compile(r"^#{1,3} .*(install|quick ?start|getting started|setup|설치)", re.I | re.M)
+README_MARK = re.compile(r"^<!-- test( (windows|unix|console))? -->$", re.M)
 
 MIT = """MIT License
 
@@ -324,6 +326,15 @@ def findings(repo, info):
     elif hangul_ratio(readme.read_text(encoding="utf-8", errors="replace")) > 0.15:
         yield "README.md is not English (move to README.ko.md, write README.md in English)", None
 
+    if readme.exists():
+        text = readme.read_text(encoding="utf-8", errors="replace")
+        if SETUP_HEADING.search(text):
+            if not README_MARK.search(text):
+                yield "README setup steps are not tested (no <!-- test --> blocks)", None
+            elif not any("readme.yml@" in w.read_text(encoding="utf-8", errors="replace")
+                         for w in (repo / ".github" / "workflows").glob("*.yml")):
+                yield "README tests are not run in CI (call NaNIsaac/.github readme.yml)", None
+
     if git(repo, "log", "--all", "-i", "-E", f"--grep={AI_TRAILER}", "--format=%h"):
         yield "AI trailers in history (run deai)", None
 
@@ -334,6 +345,8 @@ def selftest():
     assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
     assert baseline_table({"a.py": {"F841", "F401"}}).endswith('["F401", "F841"]\n')
     assert COMMIT_SUBJECT.match("fix(term): keep the hook") and not COMMIT_SUBJECT.match("Fix the hook")
+    assert README_MARK.search("a\n<!-- test windows -->\n") and not README_MARK.search("x <!-- test -->")
+    assert SETUP_HEADING.search("## Quick install") and not SETUP_HEADING.search("## License")
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
 
 

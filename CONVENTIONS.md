@@ -22,6 +22,12 @@ Rules that are cheap to follow and cost nothing to keep. `python tools/conventio
 - A package with `src/` has `tests/` run by pytest in CI. (checked)
 - `requires-python` is the lowest version CI actually tests. Packages published to PyPI do not use a pre-release bound.
 
+## README
+
+- Install and first-run steps come first, in order, as code blocks. Each block a new user should run is marked with `<!-- test -->` (or `windows`, `unix`, `console`) on the line before it. (checked)
+- CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked)
+- `README.md` is English and `README.ko.md` mirrors it, marks included.
+
 ## Releases
 
 - Tag `vX.Y.Z` and write GitHub release notes.
