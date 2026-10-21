@@ -1,0 +1,29 @@
+# Reusable: runs the marked setup steps of a repo's README on Linux, macOS and Windows.
+# A repo calls it with:
+#   jobs:
+#     readme:
+#       uses: NaNIsaac/.github/.github/workflows/readme.yml@main
+name: readme
+on:
+  workflow_call:
+
+jobs:
+  steps:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: NaNIsaac/.github
+          path: .nanisaac
+          sparse-checkout: tools
+      - name: README setup steps
+        shell: pwsh
+        run: |
+          foreach ($readme in 'README.md', 'README.ko.md') {
+              if (Test-Path $readme) { ./.nanisaac/tools/readme-test.ps1 -Readme $readme }
+          }
