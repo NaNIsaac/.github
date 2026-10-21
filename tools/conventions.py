@@ -220,6 +220,24 @@ def rewrite_tables(text, tables):
     return "".join(out)
 
 
+# Backends that build compiled code, and the build file that shows the repo needs one.
+COMPILED_BACKENDS = {"scikit_build_core.build": "CMakeLists.txt", "mesonpy": "meson.build"}
+
+
+def backend_excused(repo, backend):
+    """Whether a backend other than uv_build is the right one for this repo."""
+    # uv_build only packs pure Python; a C++/CUDA extension needs its CMake or Meson backend.
+    if (needs := COMPILED_BACKENDS.get(backend)) and (repo / needs).exists():
+        return True
+    # uv_build has no Android wheel and needs Rust to build there, so `pip install .`
+    # fails in Termux; a repo tested in Termux keeps its pure-Python backend.
+    if (repo / ".github" / "workflows" / "termux.yml").exists():
+        return True
+    # Any other reason is declared in the repo, with the reason as the value.
+    declared = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    return bool(str(declared.get("tool", {}).get("conventions", {}).get("build-backend", "")).strip())
+
+
 def fix_uv_build(repo):
     """Switch hatchling/setuptools to uv_build when the wheel stays identical; otherwise leave it."""
     path = repo / "pyproject.toml"
@@ -302,10 +320,7 @@ def findings(repo, info):
         if not (repo / ".github" / "workflows" / "lint.yml").exists():
             yield "ruff is not enforced in CI (no lint.yml)", lambda: fix_lint(repo)
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
-        # uv_build has no Android wheel and needs Rust to build there, so `pip install .`
-        # fails in Termux; a repo tested in Termux keeps its pure-Python backend.
-        termux = (repo / ".github" / "workflows" / "termux.yml").exists()
-        if backend and backend[1] != "uv_build" and not termux:
+        if backend and backend[1] != "uv_build" and not backend_excused(repo, backend[1]):
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
         lint = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("ruff", {}).get("lint", {})
         missing = RUFF_RULES - set(lint.get("select", [])) - set(lint.get("extend-select", []))
@@ -344,6 +359,14 @@ def findings(repo, info):
 
 def selftest():
     assert hangul_ratio("hello") == 0 and hangul_ratio("한글 abc") > 0.3
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        assert not backend_excused(repo, "scikit_build_core.build")
+        (repo / "CMakeLists.txt").write_text("", encoding="utf-8")
+        assert backend_excused(repo, "scikit_build_core.build") and not backend_excused(repo, "hatchling.build")
+        (repo / "pyproject.toml").write_text("[tool.conventions]\nbuild-backend = 'reason'\n", encoding="utf-8")
+        assert backend_excused(repo, "hatchling.build")
     src = "[a]\nx = 1\n\n[b]\ny = 2\n\n[c]\nz = 3\n"
     assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
     assert baseline_table({"a.py": {"F841", "F401"}}).endswith('["F401", "F841"]\n')
