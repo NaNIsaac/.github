@@ -191,7 +191,9 @@ def collect() -> list[PullRequest]:
         view = json.loads(gh("pr", "view", str(number), "-R", f"{OWNER}/{repo}", "--json", fields))
         if repo not in defaults:
             defaults[repo] = gh("api", f"repos/{OWNER}/{repo}", "--jq", ".default_branch").strip()
-        removed, created = parse_patch(gh("pr", "diff", str(number), "-R", f"{OWNER}/{repo}"))
+        # The diff is parsed, never shown, so escape sequences in it are harmless here.
+        diff = gh("pr", "diff", str(number), "-R", f"{OWNER}/{repo}", "--allow-escape-sequences")
+        removed, created = parse_patch(diff)
         changes = [
             FileChange(
                 f["path"],
