@@ -357,6 +357,7 @@ def main(argv):
     if argv[:1] == ["selftest"]:
         return selftest()
     mode, wanted = (argv[0] if argv else "check"), set(argv[1:])
+    sys.stdout.reconfigure(encoding="utf-8")
     listing = json.loads(run(
         "gh", "repo", "list", "NaNIsaac", "--limit", "200", "--json",
         "name,visibility,description,repositoryTopics,defaultBranchRef,isFork,isArchived",
