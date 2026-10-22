@@ -182,6 +182,10 @@ def fix_lint(repo):
         workflow.unlink()
         print(f"{repo.name}: lint reverted, ruff still fails with the baseline")
         return None
+    # A repo with a workflow is checked for dependabot.yml, so a first workflow brings it along.
+    if not (repo / ".github" / "dependabot.yml").exists():
+        fix_dependabot(repo)
+        return "ci: run ruff on every push and update actions with dependabot"
     return "ci: run ruff on every push"
 
 
@@ -374,6 +378,36 @@ def selftest():
     assert README_MARK.search("a\n<!-- test windows -->\n") and not README_MARK.search("x <!-- test -->")
     assert SETUP_HEADING.search("## Quick install") and not SETUP_HEADING.search("## License")
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
+    # A repo that gets its first workflow from fix_lint gets dependabot.yml in the same commit,
+    # because a repo with a workflow is checked for one. ruff itself is stubbed out.
+    class Done:
+        returncode = 0
+
+    def fake_run(*args, **kwargs):
+        return "ruff 0.17.1" if args[-1] == "--version" else "[]"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        real_run, real_sub = globals()["run"], subprocess.run
+        globals()["run"], subprocess.run = fake_run, lambda *a, **k: Done()
+        try:
+            subject = fix_lint(repo)
+        finally:
+            globals()["run"], subprocess.run = real_run, real_sub
+        assert subject and "dependabot" in subject, subject
+        assert (repo / ".github" / "workflows" / "lint.yml").exists()
+        assert (repo / ".github" / "dependabot.yml").read_text(encoding="utf-8") == DEPENDABOT
+        # one that already has its own dependabot.yml keeps it
+        (repo / ".github" / "workflows" / "lint.yml").unlink()
+        (repo / ".github" / "dependabot.yml").write_text("version: 2\n# mine\n", encoding="utf-8")
+        globals()["run"], subprocess.run = fake_run, lambda *a, **k: Done()
+        try:
+            subject = fix_lint(repo)
+        finally:
+            globals()["run"], subprocess.run = real_run, real_sub
+        assert subject == "ci: run ruff on every push", subject
+        assert (repo / ".github" / "dependabot.yml").read_text(encoding="utf-8").endswith("# mine\n")
 
 
 def main(argv):
