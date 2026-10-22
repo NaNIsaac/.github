@@ -20,6 +20,11 @@ are green, mergeable, not stale and not stacked on an open PR get a printed
 A PR is stale when its base branch moved after its last check run finished: its CI did not
 see what it would be merged into. Two PRs of one repo that touch the same file are listed as
 overlapping, so the second is rebased and rechecked after the first is merged.
+
+GitHub closes an issue on merge only when the PR is linked to it and merges into the default
+branch. A `Fixes #N` in the body of a PR stacked on another PR's branch is not linked, and a
+link made earlier does not close anything while the base is not the default branch. The
+digest flags both and lists the issues that may stay open after their fix is merged.
 """
 
 import json
@@ -43,6 +48,10 @@ SOURCE = re.compile(r"^src/")
 CODE = re.compile(r"\.(py|pyx|rs|c|cc|cpp|h|hpp|cu|cuh|js|ts|jl|m|f90)$", re.I)
 HELPER = re.compile(r"^(examples|scripts|benchmarks|tools|notebooks)/")
 PRE_MERGE = re.compile(r"^\s*pre-merge:\s*(.+)$", re.M | re.I)
+# GitHub's closing keywords; each issue needs its own keyword ("Fixes #1, fixes #2").
+CLOSING = re.compile(
+    rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:{OWNER}/([\w.-]+))?#(\d+)\b", re.I
+)
 
 
 @dataclass
@@ -90,6 +99,22 @@ class PullRequest:
     stacked_on: int | None = None
     pre_merge: list[str] = field(default_factory=list)
     overlaps: list[int] = field(default_factory=list)
+    default: str = "main"
+    fixes: list[int] = field(default_factory=list)  # closing keywords in the body
+    linked: list[int] = field(default_factory=list)  # what GitHub will close on merge
+
+
+def body_fixes(repo: str, body: str) -> list[int]:
+    """Issues of `repo` that the body names with a closing keyword."""
+    found = (int(n) for r, n in CLOSING.findall(body) if not r or r.lower() == repo.lower())
+    return sorted(set(found))
+
+
+def left_open(p: PullRequest) -> list[int]:
+    """Issues the PR says it fixes that its own merge will not close."""
+    if p.base != p.default:
+        return sorted(set(p.fixes) | set(p.linked))
+    return [n for n in p.fixes if n not in p.linked]
 
 
 def gh(*args):
@@ -156,11 +181,16 @@ def collect() -> list[PullRequest]:
             "repository,number",
         )
     )
-    fields = "title,url,baseRefName,headRefName,files,statusCheckRollup,mergeable,comments"
-    prs, base_cache = [], {}
+    fields = (
+        "title,url,baseRefName,headRefName,files,statusCheckRollup,mergeable,comments,"
+        "body,closingIssuesReferences"
+    )
+    prs, base_cache, defaults = [], {}, {}
     for item in listing:
         repo, number = item["repository"]["name"], item["number"]
         view = json.loads(gh("pr", "view", str(number), "-R", f"{OWNER}/{repo}", "--json", fields))
+        if repo not in defaults:
+            defaults[repo] = gh("api", f"repos/{OWNER}/{repo}", "--jq", ".default_branch").strip()
         removed, created = parse_patch(gh("pr", "diff", str(number), "-R", f"{OWNER}/{repo}"))
         changes = [
             FileChange(
@@ -188,6 +218,9 @@ def collect() -> list[PullRequest]:
                 mergeable=view["mergeable"] == "MERGEABLE",
                 stale=bool(last_check and moved and moved > last_check),
                 pre_merge=notes,
+                default=defaults[repo],
+                fixes=body_fixes(repo, view["body"] or ""),
+                linked=sorted(i["number"] for i in view["closingIssuesReferences"]),
             )
         )
     link(prs)
@@ -237,7 +270,9 @@ def digest(prs: list[PullRequest]) -> str:
         "맞지 않는 파일은 한 단계 위로 간다."
     )
     out.append("")
-    commands = []
+    commands, unclosed = [], []
+    # An issue another open PR closes from the default branch is taken care of.
+    closed_on_main = {(p.repo, n) for p in prs if p.base == p.default for n in p.linked}
     for repo in sorted({p.repo for p in prs}, key=str.lower):
         group = ordered([p for p in prs if p.repo == repo])
         listed: set[int] = set()
@@ -253,6 +288,10 @@ def digest(prs: list[PullRequest]) -> str:
                 flags.append(f"#{p.stacked_on} 위에 쌓임")
             if p.overlaps:
                 flags.append("같은 파일: " + ", ".join(f"#{n}" for n in p.overlaps))
+            if left := [n for n in left_open(p) if (repo, n) not in closed_on_main]:
+                why = f"base `{p.base}`" if p.base != p.default else "본문의 Fixes가 연결 안 됨"
+                flags.append(f"merge해도 안 닫힘 ({why}): " + ", ".join(f"#{n}" for n in left))
+                unclosed.extend(f"- {repo}#{n} ← #{p.number} ({why})" for n in left)
             out.append(f"- [{p.tier}] #{p.number} {p.title} ({p.lines}줄) — {'; '.join(flags)}")
             out.extend(f"  - pre-merge: {note}" for note in p.pre_merge)
             # After one of two PRs on the same file is merged, the other has to be rebased
@@ -262,6 +301,17 @@ def digest(prs: list[PullRequest]) -> str:
                 commands.append(
                     f"gh pr merge {p.number} -R {OWNER}/{repo} --rebase --delete-branch"
                 )
+        out.append("")
+    if unclosed:
+        out.append("## merge 뒤에도 열려 있을 수 있는 이슈")
+        out.append("")
+        out.append(
+            "고치는 PR이 기본 branch로 merge되지 않거나 이슈에 연결되지 않았다. 아래 PR이 "
+            "`--delete-branch`로 merge되면 GitHub가 쌓인 PR의 base를 옮긴다. 그 PR이 merge된 "
+            "뒤에도 이슈가 열려 있으면 손으로 닫는다."
+        )
+        out.append("")
+        out.extend(unclosed)
         out.append("")
     out.append(
         "## low 등급 중 바로 merge 할 수 있는 것 "
@@ -330,6 +380,27 @@ def selftest():
     link([a, c])
     commands = [line for line in digest([a, c]).splitlines() if line.startswith("gh pr merge")]
     assert commands == [f"gh pr merge 1 -R {OWNER}/r --rebase --delete-branch"], commands
+    assert body_fixes("r", "Fixes #22. Stacked on #15.") == [22]
+    assert body_fixes("r", "fixes #1, closes: #2 and #3; resolved NaNIsaac/r#4") == [1, 2, 4]
+    assert body_fixes("r", "Fixes NaNIsaac/other#5, prefix#6, Refs #7") == []
+    # Stacked: the body's Fixes is not linked, and nothing closes until the base is main.
+    b.fixes, b.linked = [22], []
+    assert left_open(b) == [22]
+    # A link made while the PR targeted main does not close the issue from another base.
+    b.fixes, b.linked = [], [29]
+    assert left_open(b) == [29]
+    # On main and linked: GitHub closes it. On main but not linked: flagged.
+    a.fixes, a.linked = [36], [36]
+    assert left_open(a) == []
+    a.linked = []
+    assert left_open(a) == [36]
+    a.fixes = b.fixes = b.linked = []
+    b.fixes = [22]
+    text = digest([a, b])
+    assert "- r#22 ← #2 (base `x`)" in text and "merge해도 안 닫힘" in text
+    a.linked = [22]
+    assert "r#22" not in digest([a, b])
+    a.linked = b.fixes = []
     hand = "# Q\n\n## 0. by hand\nkeep\n\n## 4. also by hand\nkeep too\n"
     once = replace_generated(hand, "## generated\nv1\n")
     twice = replace_generated(once + "\n## 9. added later by hand\nstay\n", "## generated\nv2\n")
@@ -346,6 +417,7 @@ def main(argv):
         write(Path(argv[1]), body)
         print(f"wrote {argv[1]}")
     else:
+        sys.stdout.reconfigure(encoding="utf-8")
         print(body)
     return 0
 
