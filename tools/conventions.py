@@ -31,6 +31,8 @@ LEGACY_EMAILS = (
 OWN_FORKS = {"NaNIsaac.github.io"}
 NO_LICENSE = {".github", "NaNIsaac", "Life"}
 NO_COMMIT_FORMAT = {"Life"}
+# Checkouts that are not at ROOT/<name> because that path is taken: ROOT/docs is the notes folder.
+LOCAL_PATHS = {"docs": "docs-site"}
 RUFF_RULES = {"I", "UP", "B"}
 COMMIT_SUBJECT = re.compile(
     r"(feat|fix|docs|test|chore|ci|build|style|refactor|perf)(\([\w./-]+\))?!?: \S"
@@ -73,13 +75,13 @@ def git(repo, *args):
     return run("git", *args, cwd=repo)
 
 
-def fix_worktree(repo):
+def fix_worktree(repo, name):
     """A new worktree of `repo` on its own branch from origin/main, or None when it cannot
     be made. The folder keeps the repo name so name-based rules still apply."""
-    path = ROOT / "_wt" / "conventions" / repo.name
+    path = ROOT / "_wt" / "conventions" / name
     branch = f"chore/conventions-{date.today():%Y%m%d}"
     if path.exists():
-        print(f"{repo.name}: {path} already exists, fixes skipped")
+        print(f"{name}: {path} already exists, fixes skipped")
         return None
     git(repo, "fetch", "-q", "origin", "main")
     done = subprocess.run(
@@ -87,7 +89,7 @@ def fix_worktree(repo):
         cwd=repo, capture_output=True, text=True, check=False,
     )
     if done.returncode:
-        print(f"{repo.name}: no worktree ({done.stderr.strip()}), fixes skipped")
+        print(f"{name}: no worktree ({done.stderr.strip()}), fixes skipped")
         return None
     return path
 
@@ -304,7 +306,7 @@ def fix_uv_build(repo):
 
 def findings(repo, info):
     """Yield (message, fix) pairs; fix is a zero-argument callable or None."""
-    name = repo.name
+    name = info["name"]
 
     if info["defaultBranchRef"]["name"] != "main":
         yield f"default branch is {info['defaultBranchRef']['name']}", None
@@ -451,7 +453,7 @@ def main(argv):
         name = info["name"]
         if info["isArchived"] or (info["isFork"] and name not in OWN_FORKS) or (wanted and name not in wanted):
             continue
-        repo = ROOT / name
+        repo = ROOT / LOCAL_PATHS.get(name, name)
         if not (repo / ".git").exists():
             continue
         found = list(findings(repo, info))
@@ -462,7 +464,7 @@ def main(argv):
             continue
         if not any(f for _, f in found):
             continue
-        work = fix_worktree(repo)
+        work = fix_worktree(repo, name)
         if work is None:
             continue
         # Each fix is bound to the path it was found in, so find them again in the worktree.
