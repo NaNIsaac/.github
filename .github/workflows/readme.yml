@@ -15,6 +15,8 @@ jobs:
         # macOS minutes cost ten times as much on private repositories, so they only get Linux and Windows
         os: ${{ fromJSON(github.event.repository.private && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0
@@ -25,6 +27,10 @@ jobs:
           sparse-checkout: tools
       - name: README setup steps
         shell: pwsh
+        env:
+          # Installers that call api.github.com (codigest install.sh) read this; anonymous requests hit the
+          # per-IP rate limit on shared runners.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           foreach ($readme in 'README.md', 'README.ko.md') {
               if (Test-Path $readme) { ./.nanisaac/tools/readme-test.ps1 -Readme $readme }
