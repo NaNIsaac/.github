@@ -1,10 +1,12 @@
 """Repo conventions across D:\\03_Develop\\NaNIsaac.
 
     python conventions.py check [repo ...]
-    python conventions.py fix   [repo ...]   # commits locally, never pushes
+    python conventions.py fix   [repo ...]   # commits on a branch in a worktree, never pushes
 
-check is read-only. fix handles only the mechanical rules and skips repos with
-uncommitted changes. Rules that need judgement are reported, not fixed.
+check is read-only. fix handles only the mechanical rules. For each repo with something to
+fix it makes a worktree under _wt/conventions/<repo> on a new branch from origin/main and
+commits there, so the shared checkout and its main are never touched; push the branch and
+open a PR from it. Rules that need judgement are reported, not fixed.
 """
 
 import json
@@ -69,6 +71,31 @@ def run(*args, cwd=None):
 
 def git(repo, *args):
     return run("git", *args, cwd=repo)
+
+
+def fix_worktree(repo):
+    """A new worktree of `repo` on its own branch from origin/main, or None when it cannot
+    be made. The folder keeps the repo name so name-based rules still apply."""
+    path = ROOT / "_wt" / "conventions" / repo.name
+    branch = f"chore/conventions-{date.today():%Y%m%d}"
+    if path.exists():
+        print(f"{repo.name}: {path} already exists, fixes skipped")
+        return None
+    git(repo, "fetch", "-q", "origin", "main")
+    done = subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", branch, str(path), "origin/main"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    if done.returncode:
+        print(f"{repo.name}: no worktree ({done.stderr.strip()}), fixes skipped")
+        return None
+    return path
+
+
+def drop_worktree(repo, path):
+    branch = git(path, "branch", "--show-current").strip()
+    git(repo, "worktree", "remove", "--force", str(path))
+    git(repo, "branch", "-D", branch)
 
 
 def hangul_ratio(text):
@@ -375,26 +402,36 @@ def main(argv):
         total += len(found)
         if mode != "fix":
             continue
-        fixes = [f for _, f in found if f]
-        if fixes and git(repo, "status", "--porcelain", "--untracked-files=no").strip():
-            print(f"{name}: uncommitted changes, fixes skipped")
+        if not any(f for _, f in found):
             continue
+        work = fix_worktree(repo)
+        if work is None:
+            continue
+        # Each fix is bound to the path it was found in, so find them again in the worktree.
+        fixes = [f for _, f in findings(work, info) if f]
+        committed = 0
         for fix in fixes:
-            before = set(git(repo, "status", "--porcelain", "-uall").splitlines())
+            before = set(git(work, "status", "--porcelain", "-uall").splitlines())
             subject = fix()
             if subject is None:
                 continue
-            after = set(git(repo, "status", "--porcelain", "-uall").splitlines()) - before
+            after = set(git(work, "status", "--porcelain", "-uall").splitlines()) - before
             touched = [line[3:].split(" -> ")[-1].strip('"') for line in after]
             if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/(workflows/|dependabot\.yml))", p) for p in touched):
                 # eol normalization rewrote other files; undo, a tree this noisy needs a manual look
-                git(repo, "reset", "-q", "--hard")
-                git(repo, "clean", "-fdq", "--", "LICENSE", ".gitattributes", ".mailmap")
+                git(work, "reset", "-q", "--hard")
+                git(work, "clean", "-fdq", "--", "LICENSE", ".gitattributes", ".mailmap")
                 print(f"{name}: '{subject}' touched other files, reverted")
                 continue
-            git(repo, "add", "--", *touched)
-            git(repo, "commit", "-q", "-m", subject)
+            git(work, "add", "--", *touched)
+            git(work, "commit", "-q", "-m", subject)
+            committed += 1
             print(f"{name}: committed '{subject}'")
+        if committed:
+            branch = git(work, "branch", "--show-current").strip()
+            print(f"{name}: {committed} commit(s) on {branch} in {work}; push it and open a PR")
+        else:
+            drop_worktree(repo, work)
     print(f"{total} finding(s)")
     return 1 if total and mode == "check" else 0
 
