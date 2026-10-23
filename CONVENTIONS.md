@@ -10,8 +10,24 @@ Rules that are cheap to follow and cost nothing to keep. `python tools/conventio
 
 ## Branches
 
-- `main` is always green and releasable. (default branch checked)
-- Work happens on short-lived `type/topic` branches, for example `feat/mcmc-posterior`. Delete after merge.
+Trunk-based, one long-lived branch. This is the whole model; there is no `dev`, `release` or
+`staging` branch, because one person (with agents) integrates continuously and a second
+integration branch only adds a place for work to go stale.
+
+- `main` is the only long-lived branch. It is always green and releasable. (default branch checked)
+- Every change is a short-lived `type/topic` branch (`feat/mcmc-posterior`, `fix/q-components`,
+  `docs/site`), opened as a pull request and **squash-merged**. One item of work, one branch, one PR.
+- Branches die with their PR: `delete_branch_on_merge` is on in every repository (checked), and
+  local clones run with `git config --global fetch.prune true` so deleted remotes disappear on fetch.
+- A branch should merge within days. Stacking a PR on another PR is allowed only when the base
+  PR will merge first on the same day; otherwise wait or fold the change into one PR.
+- Research branches (`research/<topic>`) are the one exception to "days": they may live for weeks,
+  but only with an open draft PR so the work is visible, and they end in one of two ways: merged
+  as documentation (the notes, figures and scripts worth keeping), or frozen as a tag
+  `archive/<topic>` and deleted. A research branch is never a second `main`.
+- Releases are tags on `main` (`vX.Y.Z`); see Releases. Nothing is released from a branch.
+- Agents follow the same rules with two additions: a branch is created only for a claimed
+  BACKLOG item, and a worktree holds exactly one branch and is removed when the PR merges.
 
 ## Python
 
