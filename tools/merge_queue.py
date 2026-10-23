@@ -31,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -58,7 +59,7 @@ CLOSING = re.compile(
 class FileChange:
     path: str
     status: str  # added, modified, removed, renamed
-    removed_lines: list[str] = field(default_factory=list)
+    deleted: int = 0  # lines the PR removes from this file
 
 
 def file_tier(change: FileChange) -> str:
@@ -68,7 +69,7 @@ def file_tier(change: FileChange) -> str:
         return "low"
     if TEST.search(path):
         # Adding tests is safe; deleting assertions weakens what CI checks.
-        return "low" if not change.removed_lines else "medium"
+        return "low" if not change.deleted else "medium"
     if WORKFLOW.search(path):
         return "low" if change.status == "added" else "medium"
     if SOURCE.search(path) or (CODE.search(path) and not HELPER.search(path)):
@@ -124,22 +125,6 @@ def gh(*args):
     return out.stdout
 
 
-def parse_patch(patch: str) -> tuple[dict[str, list[str]], set[str]]:
-    """Removed lines per file, and the files the diff creates, from a unified diff."""
-    removed: dict[str, list[str]] = {}
-    created: set[str] = set()
-    current = None
-    for line in patch.splitlines():
-        if line.startswith("diff --git "):
-            current = line.split(" b/", 1)[-1]
-            removed[current] = []
-        elif current and line.startswith("new file mode"):
-            created.add(current)
-        elif current and line.startswith("-") and not line.startswith("---"):
-            removed[current].append(line[1:])
-    return removed, created
-
-
 def check_state(rollup) -> tuple[str, datetime | None]:
     if not rollup:
         return "none", None
@@ -166,8 +151,25 @@ def base_moved_at(repo: str, base: str, cache: dict) -> datetime | None:
     return cache[key]
 
 
+PR_FIELDS = (
+    "number,title,url,baseRefName,headRefName,files,statusCheckRollup,mergeable,comments,"
+    "body,closingIssuesReferences"
+)
+
+
+def file_change(f: dict) -> FileChange:
+    """One entry of `gh ... --json files`. Only whether a test file lost lines matters, so the
+    deleted-line count is enough and no diff has to be fetched."""
+    return FileChange(
+        f["path"], "added" if f["changeType"] == "ADDED" else "modified", f["deletions"]
+    )
+
+
 def collect() -> list[PullRequest]:
-    listing = json.loads(
+    """Every open PR of the account: one search, one repository listing, and one `gh pr list`
+    per repository that has any. An empty search stops the run, so a failed search cannot
+    be written out as "no open PRs"."""
+    found = json.loads(
         gh(
             "search",
             "prs",
@@ -178,53 +180,65 @@ def collect() -> list[PullRequest]:
             "--limit",
             "200",
             "--json",
-            "repository,number",
+            "repository",
         )
     )
-    fields = (
-        "title,url,baseRefName,headRefName,files,statusCheckRollup,mergeable,comments,"
-        "body,closingIssuesReferences"
-    )
-    prs, base_cache, defaults = [], {}, {}
-    for item in listing:
-        repo, number = item["repository"]["name"], item["number"]
-        view = json.loads(gh("pr", "view", str(number), "-R", f"{OWNER}/{repo}", "--json", fields))
-        if repo not in defaults:
-            defaults[repo] = gh("api", f"repos/{OWNER}/{repo}", "--jq", ".default_branch").strip()
-        # The diff is parsed, never shown, so escape sequences in it are harmless here.
-        diff = gh("pr", "diff", str(number), "-R", f"{OWNER}/{repo}", "--allow-escape-sequences")
-        removed, created = parse_patch(diff)
-        changes = [
-            FileChange(
-                f["path"],
-                "added" if f["path"] in created else "modified",
-                removed.get(f["path"], []),
-            )
-            for f in view["files"]
-        ]
-        checks, last_check = check_state(view["statusCheckRollup"])
-        moved = base_moved_at(repo, view["baseRefName"], base_cache)
-        notes = [m.strip() for c in view["comments"] for m in PRE_MERGE.findall(c["body"])]
-        prs.append(
-            PullRequest(
-                repo=repo,
-                number=number,
-                title=view["title"],
-                url=view["url"],
-                base=view["baseRefName"],
-                head=view["headRefName"],
-                tier=pr_tier(changes),
-                lines=sum(f["additions"] + f["deletions"] for f in view["files"]),
-                paths=[f["path"] for f in view["files"]],
-                checks=checks,
-                mergeable=view["mergeable"] == "MERGEABLE",
-                stale=bool(last_check and moved and moved > last_check),
-                pre_merge=notes,
-                default=defaults[repo],
-                fixes=body_fixes(repo, view["body"] or ""),
-                linked=sorted(i["number"] for i in view["closingIssuesReferences"]),
+    repos = sorted({item["repository"]["name"] for item in found})
+    if not repos:
+        raise SystemExit("merge_queue: the PR search returned nothing; nothing was written")
+    defaults = {
+        r["name"]: r["defaultBranchRef"]["name"]
+        for r in json.loads(
+            gh("repo", "list", OWNER, "--limit", "200", "--json", "name,defaultBranchRef")
+        )
+        if r["defaultBranchRef"]
+    }
+    prs, base_cache = [], {}
+    for repo in repos:
+        listing = json.loads(
+            gh(
+                "pr",
+                "list",
+                "-R",
+                f"{OWNER}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                PR_FIELDS,
             )
         )
+        for view in listing:
+            number = view["number"]
+            if view["mergeable"] == "UNKNOWN":  # GitHub has not computed it yet; asking again does
+                view["mergeable"] = json.loads(
+                    gh("pr", "view", str(number), "-R", f"{OWNER}/{repo}", "--json", "mergeable")
+                )["mergeable"]
+            changes = [file_change(f) for f in view["files"]]
+            checks, last_check = check_state(view["statusCheckRollup"])
+            moved = base_moved_at(repo, view["baseRefName"], base_cache)
+            notes = [m.strip() for c in view["comments"] for m in PRE_MERGE.findall(c["body"])]
+            prs.append(
+                PullRequest(
+                    repo=repo,
+                    number=number,
+                    title=view["title"],
+                    url=view["url"],
+                    base=view["baseRefName"],
+                    head=view["headRefName"],
+                    tier=pr_tier(changes),
+                    lines=sum(f["additions"] + f["deletions"] for f in view["files"]),
+                    paths=[f["path"] for f in view["files"]],
+                    checks=checks,
+                    mergeable=view["mergeable"] == "MERGEABLE",
+                    stale=bool(last_check and moved and moved > last_check),
+                    pre_merge=notes,
+                    default=defaults.get(repo, "main"),
+                    fixes=body_fixes(repo, view["body"] or ""),
+                    linked=sorted(i["number"] for i in view["closingIssuesReferences"]),
+                )
+            )
     link(prs)
     return prs
 
@@ -345,6 +359,8 @@ def write(path: Path, body: str) -> None:
 
 
 def selftest():
+    global gh
+
     def tier(*changes):
         return pr_tier(
             [FileChange(*c) if isinstance(c, tuple) else FileChange(c, "modified") for c in changes]
@@ -353,7 +369,7 @@ def selftest():
     assert tier("README.md") == tier("docs/perf.md") == tier("tests/test_x.py") == "low"
     assert tier((".github/workflows/examples.yml", "added")) == "low"
     assert tier(".github/workflows/ci.yml") == "medium"
-    assert tier(("tests/test_x.py", "modified", ["    assert x == 1"])) == "medium"
+    assert tier(("tests/test_x.py", "modified", 1)) == "medium"
     assert tier("uv.lock") == tier("pyproject.toml") == tier("examples/run.py") == "medium"
     assert tier("src/pkg/core.py") == "physics" and tier("README.md", "src/a.py") == "physics"
     assert tier("sim.py") == tier("engine/collide.py") == "physics"
@@ -367,12 +383,13 @@ def selftest():
         assert TIERS.index(pr_tier([*base, FileChange(extra, "modified")])) >= TIERS.index(
             pr_tier(base)
         )
-    assert parse_patch("diff --git a/t.py b/t.py\n--- a/t.py\n+++ b/t.py\n-old\n+new\n") == (
-        {"t.py": ["old"]},
-        set(),
+    f = {"path": "w.yml", "changeType": "ADDED", "deletions": 0}
+    assert file_change(f) == FileChange("w.yml", "added", 0)
+    g = {"path": "tests/t.py", "changeType": "MODIFIED", "deletions": 3}
+    assert (
+        file_change(g) == FileChange("tests/t.py", "modified", 3)
+        and file_tier(file_change(g)) == "medium"
     )
-    created = "diff --git a/w.yml b/w.yml\nnew file mode 100644\n--- /dev/null\n+++ b/w.yml\n+x\n"
-    assert parse_patch(created) == ({"w.yml": []}, {"w.yml"})
     a = PullRequest("r", 1, "", "", "main", "x", "low", 1, ["a"], "green", True, False)
     b = PullRequest("r", 2, "", "", "x", "y", "low", 1, ["a"], "green", True, False)
     link([a, b])
@@ -408,6 +425,21 @@ def selftest():
     twice = replace_generated(once + "\n## 9. added later by hand\nstay\n", "## generated\nv2\n")
     assert "v1" not in twice and "v2" in twice and twice.count(BEGIN) == 1
     assert all(s in twice for s in ("## 0. by hand", "## 4. also by hand", "## 9. added later"))
+    # An empty search stops the run, and --write then leaves the file as it was.
+    real_gh, gh = gh, lambda *args: "[]"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "MERGE_QUEUE.md"
+            target.write_text("# Q\n\nkeep\n", encoding="utf-8")
+            try:
+                main(["--write", str(target)])
+            except SystemExit as stop:
+                assert "returned nothing" in str(stop)
+            else:
+                raise AssertionError("an empty search was accepted")
+            assert target.read_text(encoding="utf-8") == "# Q\n\nkeep\n"
+    finally:
+        gh = real_gh
     print("selftest ok")
 
 
