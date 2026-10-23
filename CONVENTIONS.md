@@ -22,6 +22,8 @@ Rules that are cheap to follow and cost nothing to keep. `python tools/conventio
 - The build backend is `uv_build`, with three exceptions the checker knows: a compiled extension keeps `scikit_build_core` (with a `CMakeLists.txt`) or `mesonpy` (with a `meson.build`), since uv_build packs only pure Python; a repo with a Termux CI job (`termux.yml`) keeps hatchling, since uv_build cannot be built from source on Android; and any other reason is declared in the repo as `[tool.conventions] build-backend = "<reason>"` in `pyproject.toml`. (checked)
 - A package with `src/` has `tests/` run by pytest in CI. (checked)
 - `requires-python` is the lowest version CI actually tests. Packages published to PyPI do not use a pre-release bound.
+- A repo that depends on `genx3` excludes `wxpython` on Linux, because PyPI has no Linux wheel for it and building it fails without GTK headers: `[tool.uv] override-dependencies = ["wxpython; sys_platform != 'linux'"]`. The repo does not start the GenX GUI, so nothing is lost.
+- A repo that takes `torch` from the `pytorch-cu128` index restricts the source with `marker = "sys_platform != 'darwin'"` (or `== 'win32'`), because that index has no macOS wheels and `uv sync` cannot resolve there. The README job runs on macOS for public repos.
 
 ## README
 
