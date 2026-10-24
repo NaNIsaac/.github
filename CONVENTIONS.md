@@ -53,6 +53,15 @@ integration branch only adds a place for work to go stale.
 - CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked)
 - `README.md` is English and `README.ko.md` mirrors it, marks included.
 
+## CI cost
+
+Private repositories get 2,000 included minutes a month, where a Windows minute counts 2 and a macOS minute 10; when they run out, every private job stops. Public repositories are free, but their macOS runners queue for an hour. So a push should cost one cheap Linux run.
+
+- A workflow that runs on `pull_request` has a `concurrency` group with `cancel-in-progress`, so a newer push replaces the run that is still going. (checked, `ci-concurrency`)
+- macOS (and any other runner that costs more than Linux) runs for a release (a tag) or by hand with `workflow_dispatch`, not on every pull request. A plan job that picks the matrix from `github.ref` keeps the full matrix for the release. (checked, `ci-macos`)
+- A change that only touches README, CHANGELOG or LICENSE skips the heavy workflow with `paths-ignore`; the README test has its own workflow.
+- Run the checks CI runs before pushing: `uvx ruff@<the pinned version> check` and `format --check`, and the fast tests. A push that fails on lint costs a whole run.
+
 ## Releases
 
 - Tag `vX.Y.Z` and write GitHub release notes.
@@ -68,4 +77,5 @@ integration branch only adds a place for work to go stale.
   readme-language = "the project is about the Korean language and README.md is Korean"
   ```
 
+  `ci-concurrency` and `ci-macos` excuse the two CI cost rules.
   `readme-tests` covers the setup steps (not tested, not run in CI); `readme-language` covers an English `README.md`. The build backend keeps its own declaration, `[tool.conventions] build-backend` in `pyproject.toml`.

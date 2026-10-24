@@ -39,7 +39,7 @@ COMMIT_FORMAT_SINCE = "2026-10-22"
 # A repo can excuse itself from a rule in .conventions.toml, with the reason as the value:
 #   [exempt]
 #   readme-tests = "the README steps change this machine and cannot run on CI"
-EXEMPT_RULES = {"readme-tests", "readme-language"}
+EXEMPT_RULES = {"readme-tests", "readme-language", "ci-concurrency", "ci-macos"}
 # Checkouts that are not at ROOT/<name> because that path is taken: ROOT/docs is the notes folder.
 LOCAL_PATHS = {"docs": "docs-site"}
 RUFF_RULES = {"I", "UP", "B"}
@@ -159,6 +159,62 @@ def subject_problems(repo):
         repo, "log", "-n", "20", "--no-merges", f"--since={COMMIT_FORMAT_SINCE}", "--format=%s"
     ).splitlines()
     return [s for s in subjects if not COMMIT_SUBJECT.match(s) or len(s) > 100]
+
+
+def cost_problems(name, text):
+    """[(rule, message)] for a workflow that burns minutes: a newer push does not cancel the old run,
+    or macOS runs on every pull request (a macOS minute counts ten on a private repository)."""
+    if not re.search(r"(?m)^\s*pull_request(_target)?\s*:|^on:\s*\[[^\]]*pull_request", text):
+        return []
+    problems = []
+    calls_shared = re.search(r"uses:\s*NaNIsaac/\.github/\.github/workflows/", text)
+    if "concurrency:" not in text and not calls_shared:
+        problems.append(
+            (
+                "ci-concurrency",
+                f"{name} runs on pull_request without concurrency, so a newer push does not cancel the old run",
+            )
+        )
+    if re.search(r"macos", text, re.IGNORECASE) and "refs/tags/" not in text:
+        problems.append(
+            (
+                "ci-macos",
+                f"{name} runs macOS on every pull_request; run it for a release (tag) or by hand",
+            )
+        )
+    return problems
+
+
+CONCURRENCY = """# A newer push to a pull request replaces the run that is still going
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+"""
+
+
+def add_concurrency(text):
+    """The workflow text with a concurrency block before its top-level `jobs:`, or None if it cannot be placed."""
+    if "concurrency:" in text:
+        return None
+    match = re.search(r"(?m)^jobs:\s*$", text)
+    if not match:
+        return None
+    nl = "\r\n" if "\r\n" in text else "\n"
+    return text[: match.start()] + CONCURRENCY.replace("\n", nl) + text[match.start() :]
+
+
+def fix_concurrency(repo):
+    changed = 0
+    for path in sorted((repo / ".github" / "workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        if not any(rule == "ci-concurrency" for rule, _ in cost_problems(path.name, text)):
+            continue
+        new = add_concurrency(text)
+        if new:
+            path.write_text(new, encoding="utf-8", newline="")
+            changed += 1
+    return "ci: cancel a pull request's run when a newer push arrives" if changed else None
 
 
 def declared_exemptions(repo):
@@ -576,6 +632,15 @@ def findings(repo, info):
         ).strip()
         if lint:
             yield f"actionlint: {lint.splitlines()[0]}", None
+        excused = declared_exemptions(repo)
+        for workflow_file in sorted(workflows.glob("*.yml")):
+            text = workflow_file.read_text(encoding="utf-8", errors="replace")
+            for rule, message in cost_problems(workflow_file.name, text):
+                if rule not in excused:
+                    yield (
+                        message,
+                        (lambda: fix_concurrency(repo)) if rule == "ci-concurrency" else None,
+                    )
 
     pyproject = repo / "pyproject.toml"
     if pyproject.exists():
@@ -646,6 +711,26 @@ def findings(repo, info):
 
 
 def selftest():
+    cheap = "on:\n  pull_request:\nconcurrency:\n  group: x\njobs: {}\n"
+    assert cost_problems("ci.yml", cheap) == []
+    assert [r for r, _ in cost_problems("ci.yml", "on:\n  pull_request:\njobs: {}\n")] == [
+        "ci-concurrency"
+    ]
+    mac = "on: [push, pull_request]\nconcurrency: x\nos: [macos-latest]\n"
+    assert [r for r, _ in cost_problems("ci.yml", mac)] == ["ci-macos"]
+    assert cost_problems("ci.yml", mac + "if: startsWith(github.ref, 'refs/tags/')\n") == []
+    assert (
+        cost_problems("release.yml", "on:\n  push:\n    tags: ['v*']\nos: [macos-latest]\n") == []
+    )
+    caller = "on:\n  pull_request:\njobs:\n  readme:\n    uses: NaNIsaac/.github/.github/workflows/readme.yml@main\n"
+    assert cost_problems("readme.yml", caller) == []
+    fixed = add_concurrency("on:\n  pull_request:\njobs:\n  a: {}\n")
+    assert (
+        fixed
+        and fixed.index("concurrency:") < fixed.index("jobs:")
+        and cost_problems("x.yml", fixed) == []
+    )
+    assert add_concurrency(fixed) is None and add_concurrency("on: x\n") is None
     assert hangul_ratio("hello") == 0 and hangul_ratio("한글 abc") > 0.3
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
