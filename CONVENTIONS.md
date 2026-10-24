@@ -41,6 +41,12 @@ integration branch only adds a place for work to go stale.
 - A repo that depends on `genx3` excludes `wxpython` on Linux, because PyPI has no Linux wheel for it and building it fails without GTK headers: `[tool.uv] override-dependencies = ["wxpython; sys_platform != 'linux'"]`. The repo does not start the GenX GUI, so nothing is lost.
 - A repo that takes `torch` from the `pytorch-cu128` index restricts the source with `marker = "sys_platform != 'darwin'"` (or `== 'win32'`), because that index has no macOS wheels and `uv sync` cannot resolve there. The README job runs on macOS for public repos.
 
+## Comments and GitHub text
+
+- Code comments, docstrings, commit messages, pull requests, issues and review comments are in English. The exceptions are `README.ko.md` and repos whose subject is the Korean language (`hangeul`, `hanfix`). (Korean in comments and docstrings checked, outside those repos)
+- A comment says why, which the code cannot. No numbered step comments (`# 1.`, `# Step 2:`), no section banners (`# ---- Load ----`), no comment that restates the line below, no `Note:` or `Important:` emphasis. (step, banner and `Note:`/`Important:` comments checked in Python, PowerShell, shell and C-like sources)
+- A file you touch loses such comments; deleting is the default, translating only what still earns its place.
+
 ## README
 
 - Install and first-run steps come first, in order, as code blocks. Each block a new user should run is marked with `<!-- test -->` (or `windows`, `unix`, `console`) on the line before it. (checked)

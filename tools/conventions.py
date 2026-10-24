@@ -9,12 +9,15 @@ commits there, so the shared checkout and its main are never touched; push the b
 open a PR from it. Rules that need judgement are reported, not fixed.
 """
 
+import ast
+import io
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 import tomllib
 import zipfile
 from datetime import date
@@ -40,6 +43,21 @@ COMMIT_SUBJECT = re.compile(
 AI_TRAILER = r"co-authored-by:.*(claude|anthropic)|generated with.*claude"
 SETUP_HEADING = re.compile(r"^#{1,3} .*(install|quick ?start|getting started|setup|설치)", re.I | re.M)
 README_MARK = re.compile(r"^<!-- test( (windows|unix|console))? -->$", re.M)
+# Repos whose subject is the Korean language may keep Korean comments; the other comment rules still apply.
+KOREAN_SUBJECT = {"hangeul", "hanfix"}
+C_LIKE = (".rs", ".js", ".ts", ".tsx", ".jsx", ".c", ".cc", ".cpp", ".cu", ".h", ".hpp", ".go", ".java")
+COMMENT_MARKER = {".py": "#", ".ps1": "#", ".sh": "#"} | dict.fromkeys(C_LIKE, "//")
+HANGUL = re.compile(r"[가-힣]")
+STEP_COMMENT = re.compile(r"(\d+[.)]\s|step\s*\d+\b)", re.IGNORECASE)
+BANNER_COMMENT = re.compile(r"[-=*#~_]{4,}|[-=*]{3,}\s.*\S\s[-=*]{3,}$")
+EMPHASIS_COMMENT = re.compile(r"(note|important)\s*:", re.IGNORECASE)
+COMMENT_RULES = {
+    "korean": "comments or docstrings in Korean",
+    "step": "numbered step comments",
+    "banner": "banner comments",
+    "emphasis": "Note:/Important: comments",
+}
+SKIPPED_SOURCE = re.compile(r"(^|/)(vendor|third_party|node_modules)/|\.min\.")
 
 MIT = """MIT License
 
@@ -103,6 +121,78 @@ def drop_worktree(repo, path):
 def hangul_ratio(text):
     letters = len(re.findall(r"[A-Za-z가-힣]", text))
     return len(re.findall(r"[가-힣]", text)) / letters if letters else 0.0
+
+
+def python_comments(text):
+    """(line, text) for each comment and docstring of a Python source, or None when it does not parse."""
+    try:
+        comments = [
+            (tok.start[0], tok.string[1:].strip())
+            for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+            if tok.type == tokenize.COMMENT
+        ]
+        tree = ast.parse(text)
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    docstrings = [
+        (node.body[0].lineno, doc)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and (doc := ast.get_docstring(node, clean=False))
+    ]
+    return comments, docstrings
+
+
+def line_comments(suffix, text):
+    """(line, text) for each comment that starts after whitespace or at the start of a line, plus
+    one entry per block comment, where a Korean word is the only thing looked for."""
+    marker = re.escape(COMMENT_MARKER[suffix])
+    pattern = re.compile(rf"(?:^|\s){marker}(.*)$")
+    comments = [
+        (number, m[1].lstrip("/!").strip())
+        for number, line in enumerate(text.splitlines(), 1)
+        if (m := pattern.search(line))
+    ]
+    docstrings = [
+        (text.count("\n", 0, m.start()) + 1, m[0]) for m in re.finditer(r"/\*.*?\*/", text, re.DOTALL)
+    ] if suffix in C_LIKE else []
+    return comments, docstrings
+
+
+def comment_hits(suffix, text, korean_allowed=False):
+    """(rule, line) for each breach of the comment rules (BACKLOG rule 27) in one source file."""
+    found = python_comments(text) if suffix == ".py" else line_comments(suffix, text)
+    if found is None:
+        return []
+    comments, docstrings = found
+    hits = []
+    for line, body in comments:
+        if body.startswith(("noqa", "type:")):
+            continue
+        if STEP_COMMENT.match(body):
+            hits.append(("step", line))
+        if BANNER_COMMENT.match(body):
+            hits.append(("banner", line))
+        if EMPHASIS_COMMENT.match(body):
+            hits.append(("emphasis", line))
+    if not korean_allowed:
+        hits += [("korean", line) for line, body in comments + docstrings if HANGUL.search(body)]
+    return sorted(hits, key=lambda h: h[1])
+
+
+def comment_findings(repo, name):
+    """One message per rule with the count and the first place, over the tracked source files."""
+    hits = {}
+    for path in git(repo, "ls-files", "-z").split("\0"):
+        suffix = Path(path).suffix
+        if suffix not in COMMENT_MARKER or SKIPPED_SOURCE.search(path) or not (repo / path).is_file():
+            continue
+        text = (repo / path).read_text(encoding="utf-8", errors="replace")
+        for rule, line in comment_hits(suffix, text, name in KOREAN_SUBJECT):
+            hits.setdefault(rule, []).append(f"{path}:{line}")
+    for rule, label in COMMENT_RULES.items():
+        if rule in hits:
+            yield f"{len(hits[rule])} {label}, first at {hits[rule][0]}"
 
 
 def copyright_years(repo):
@@ -386,6 +476,9 @@ def findings(repo, info):
                          for w in (repo / ".github" / "workflows").glob("*.yml")):
                 yield "README tests are not run in CI (call NaNIsaac/.github readme.yml)", None
 
+    for message in comment_findings(repo, name):
+        yield message, None
+
     if git(repo, "log", "--all", "-i", "-E", f"--grep={AI_TRAILER}", "--format=%h"):
         yield "AI trailers in history (run deai)", None
 
@@ -407,6 +500,43 @@ def selftest():
     assert README_MARK.search("a\n<!-- test windows -->\n") and not README_MARK.search("x <!-- test -->")
     assert SETUP_HEADING.search("## Quick install") and not SETUP_HEADING.search("## License")
     assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
+    flagged = {
+        "# 1. load the file\nx = 1\n": [("step", 1)],
+        "x = 1  # Step 2: parse\n": [("step", 1)],
+        "# 3) parse\n": [("step", 1)],
+        "# ---- Load ----\n": [("banner", 1)],
+        "# ========\n": [("banner", 1)],
+        "######\n": [("banner", 1)],
+        "# === Load ===\n": [("banner", 1)],
+        "# Note: this is slow\n": [("emphasis", 1)],
+        "# IMPORTANT: keep the order\n": [("emphasis", 1)],
+        "# 파일을 읽는다\n": [("korean", 1)],
+        "def f():\n    '''읽는다.'''\n": [("korean", 2)],
+        "x = 1\n# 1. 읽기\n": [("step", 2), ("korean", 2)],
+    }
+    for source, want in flagged.items():
+        assert comment_hits(".py", source) == want, (source, comment_hits(".py", source))
+    clean = (
+        "# 1.5 times the width, because the detector tilts\n",
+        "# the step size is fixed by the motor\n",
+        "# a note on rounding: half to even\n",
+        "x = 'http://example.com'  # noqa: E501\n",
+        "#!/usr/bin/env python\n",
+        "# ruff: noqa: F401\n",
+        "def f():\n    '''Read the file.'''\n",
+        "s = '파일'\n",
+        "def broken(:\n",
+    )
+    for source in clean:
+        assert comment_hits(".py", source) == [], (source, comment_hits(".py", source))
+    assert comment_hits(".py", "# 파일을 읽는다\n", korean_allowed=True) == []
+    assert comment_hits(".py", "# 1. 읽기\n", korean_allowed=True) == [("step", 1)]
+    assert comment_hits(".rs", "let x = 1; // Step 1: init\n") == [("step", 1)]
+    assert comment_hits(".rs", "/// 읽는다\nfn f() {}\n") == [("korean", 1)]
+    assert comment_hits(".js", "/* 읽는다 */\nlet a = 'http://x';\n") == [("korean", 1)]
+    assert comment_hits(".ps1", "# ---- setup ----\n") == [("banner", 1)]
+    assert comment_hits(".sh", "echo $#\n") == [] and comment_hits(".js", "a = 'x//y';\n") == []
+    assert KOREAN_SUBJECT == {"hangeul", "hanfix"}
     # A repo that gets its first workflow from fix_lint gets dependabot.yml in the same commit,
     # because a repo with a workflow is checked for one. ruff itself is stubbed out.
     class Done:
