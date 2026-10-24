@@ -3,15 +3,34 @@
 #   jobs:
 #     readme:
 #       uses: NaNIsaac/.github/.github/workflows/readme.yml@main
+# README.md and README.ko.md run on separate runners: both hold the same install blocks, and a second
+# run on the same machine fails on what the first one installed ("already installed").
 name: readme
 on:
   workflow_call:
 
 jobs:
+  find:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      readmes: ${{ steps.list.outputs.readmes }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        shell: bash
+        run: echo "readmes=$(ls README.md README.ko.md 2>/dev/null | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+
   steps:
+    needs: find
+    if: needs.find.outputs.readmes != '[]'
+    # README.md keeps the job names it had before the split
+    name: ${{ matrix.readme == 'README.md' && format('steps ({0})', matrix.os) || format('steps ({0}, {1})', matrix.os, matrix.readme) }}
     strategy:
       fail-fast: false
       matrix:
+        readme: ${{ fromJSON(needs.find.outputs.readmes) }}
         # macOS minutes cost ten times as much on private repositories, so they only get Linux and Windows
         os: ${{ fromJSON(github.event.repository.private && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
@@ -31,7 +50,5 @@ jobs:
           # Installers that call api.github.com (codigest install.sh) read this; anonymous requests hit the
           # per-IP rate limit on shared runners.
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          foreach ($readme in 'README.md', 'README.ko.md') {
-              if (Test-Path $readme) { ./.nanisaac/tools/readme-test.ps1 -Readme $readme }
-          }
+          README: ${{ matrix.readme }}
+        run: ./.nanisaac/tools/readme-test.ps1 -Readme $env:README
