@@ -9,6 +9,12 @@ name: readme
 on:
   workflow_call:
 
+# A newer push replaces the run that is still going. The group has its own prefix: the calling
+# workflow's group must not be the same string.
+concurrency:
+  group: readme-steps-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   find:
     runs-on: ubuntu-latest
