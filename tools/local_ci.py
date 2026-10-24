@@ -14,6 +14,12 @@ the repo's CI shows as `n/a`, a failing one as `FAIL` with its output on stderr 
 dirty or the PR head is a different commit. Matrix jobs run their first value unless `--all-matrix`
 is given. Steps using other `${{ }}` expressions, and `uses:` actions other than the README
 workflow, are skipped and listed.
+
+What this run did not reproduce is part of the record, so a green line is not read as more than it
+is: `| not run: ...` names the matrix combinations, jobs, actions and README blocks that were left
+out (CI runs them, this machine did not), and `| CI environment differs: ...` names the jobs that
+ran here on another operating system than the one CI uses. Both are absent when CI was reproduced
+completely.
 """
 
 import argparse
@@ -31,6 +37,13 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+LOCAL_OS = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
+# Actions that only prepare the machine or move files; they have nothing to reproduce.
+SETUP_ACTIONS = re.compile(
+    r"^(actions/(checkout|setup-[\w-]+|cache|upload-artifact)"
+    r"|astral-sh/setup-uv|Swatinem/rust-cache|dtolnay/rust-toolchain|pnpm/action-setup)(@|$)"
+)
+README_MARK = re.compile(r"^<!-- test( (windows|unix|console))? -->$", re.MULTILINE)
 README_WORKFLOW = re.compile(r"readme\.yml@")
 EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
 KINDS = ("ruff", "pytest", "readme")
@@ -64,17 +77,39 @@ def classify(command):
     if "selftest" in command:
         return "selftest"
     words = command.split()
-    return words[0] if words else "step"
+    # a short tool name is its own column; assignments, paths and odd lines share "other"
+    if not words:
+        return "step"
+    return words[0] if re.fullmatch(r"[a-z][a-z0-9-]{0,11}", words[0]) else "other"
 
 
 def matrix_combos(strategy, every):
-    matrix = {k: v for k, v in (strategy or {}).get("matrix", {}).items() if isinstance(v, list)}
-    if not matrix:
+    """The combinations of a job's matrix (all of them, or just the first unless `every`).
+
+    List values multiply; `exclude` removes combinations; each `include` entry extends the
+    combinations it matches, or is a combination of its own when it matches none."""
+    spec = (strategy or {}).get("matrix", {})
+    if not isinstance(spec, dict):
         return [{}]
-    keys = list(matrix)
-    combos = [
-        dict(zip(keys, values, strict=True)) for values in itertools.product(*matrix.values())
-    ]
+    axes = {
+        k: v for k, v in spec.items() if isinstance(v, list) and k not in {"include", "exclude"}
+    }
+    combos = (
+        [dict(zip(axes, values, strict=True)) for values in itertools.product(*axes.values())]
+        if axes
+        else []
+    )
+    for dropped in spec.get("exclude") or []:
+        combos = [c for c in combos if not all(c.get(k) == v for k, v in dropped.items())]
+    for extra in spec.get("include") or []:
+        matching = [c for c in combos if all(c[k] == v for k, v in extra.items() if k in axes)]
+        if matching and axes:
+            for c in matching:
+                c.update(extra)
+        else:
+            combos.append(dict(extra))
+    if not combos:
+        return [{}]
     return combos if every else combos[:1]
 
 
@@ -111,13 +146,25 @@ def workflow_steps(repo, every=False):
                 else:
                     skipped.append(f"{path.name}:{job_id}: reusable workflow {job['uses']}")
                 continue
+            if job.get("if"):
+                skipped.append(f"{path.name}:{job_id}: job has an if: ({job['if']})")
+                continue
             defaults = (job.get("defaults") or {}).get("run") or {}
             for combo in matrix_combos(job.get("strategy"), every):
                 label = ",".join(f"{k}={v}" for k, v in combo.items())
+                blocked_by = None
                 for index, step in enumerate(job.get("steps") or [], 1):
+                    action = str(step.get("uses", "")).strip()
+                    if action and not SETUP_ACTIONS.match(action):
+                        blocked_by = action.split("@")[0]
                     if "run" not in step:
                         continue
                     where = f"{path.name}:{job_id}[{index}]" + (f" ({label})" if label else "")
+                    if blocked_by:
+                        skipped.append(
+                            f"{where}: follows the action {blocked_by}, whose effect is not reproduced"
+                        )
+                        continue
                     env = {**(job.get("env") or {}), **(step.get("env") or {})}
                     values = [
                         step["run"],
@@ -135,6 +182,100 @@ def workflow_steps(repo, every=False):
                     shell = step.get("shell", defaults.get("shell", "bash"))
                     steps.append(Step(classify(filled[0]), where, filled[0], shell, filled[1], env))
     return steps, skipped
+
+
+def os_family(runs_on):
+    name = str(runs_on).lower()
+    for prefix, family in (
+        ("ubuntu", "linux"),
+        ("linux", "linux"),
+        ("windows", "windows"),
+        ("macos", "macos"),
+    ):
+        if name.startswith(prefix):
+            return family
+    return None
+
+
+def readme_blocks_not_run(repo, local=LOCAL_OS):
+    """README blocks marked for another operating system than this one, e.g. `unix` on Windows."""
+    other = "unix" if local == "windows" else "windows"
+    count = 0
+    for readme in ("README.md", "README.ko.md"):
+        path = repo / readme
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            count += sum(1 for m in README_MARK.finditer(text) if m[2] == other)
+    return f"README {other} blocks ({count})" if count else None
+
+
+def coverage(repo, every=False, local=LOCAL_OS):
+    """(not_run, differs): what the repo's CI does that this run did not reproduce.
+
+    not_run names matrix combinations that were left out, reusable workflows other than the
+    README one, actions that are not machine setup, steps skipped for an `if:` or an expression,
+    and the README job's other operating systems and blocks. differs names jobs that ran here
+    on another operating system than their `runs-on`.
+    """
+    not_run, differs = [], []
+    combos_left, other_os = {}, {}
+
+    def note(into, text):
+        if text and text not in into:
+            into.append(text)
+
+    for path in sorted((repo / ".github" / "workflows").glob("*.y*ml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if called_only(document):
+            continue
+        for job_id, job in (document.get("jobs") or {}).items():
+            if "uses" in job:
+                if README_WORKFLOW.search(job["uses"]):
+                    others = sorted({"linux", "macos", "windows"} - {local})
+                    note(
+                        not_run,
+                        f"{job_id} on {'+'.join(others)} (the README job runs on all three)",
+                    )
+                    note(not_run, readme_blocks_not_run(repo, local))
+                else:
+                    note(not_run, f"{job_id} (reusable workflow {job['uses']})")
+                continue
+            if job.get("if"):
+                note(not_run, f"{job_id} (job condition: {job['if']})")
+                continue
+            combos = matrix_combos(job.get("strategy"), True)
+            ran = combos if every else combos[:1]
+            for combo in combos:
+                label = ",".join(str(v) for v in combo.values())
+                if combo not in ran:
+                    combos_left.setdefault(job_id, []).append(label)
+                    continue
+                runs_on = substitute(job.get("runs-on", ""), combo)
+                family = os_family(runs_on) if runs_on else None
+                if family and family != local:
+                    jobs = other_os.setdefault(runs_on, [])
+                    if job_id not in jobs:
+                        jobs.append(job_id)
+                blocked_by = None
+                for step in job.get("steps") or []:
+                    action = str(step.get("uses", "")).strip()
+                    if action and not SETUP_ACTIONS.match(action):
+                        blocked_by = action.split("@")[0]
+                        note(not_run, f"{job_id}: action {blocked_by}")
+                    if "run" not in step:
+                        continue
+                    if blocked_by:
+                        note(not_run, f"{job_id}: steps after {blocked_by}")
+                    elif step.get("if") or substitute(step["run"], combo) is None:
+                        note(not_run, f"{job_id}: a step with an if: or an expression")
+    for job_id, labels in combos_left.items():
+        note(
+            not_run,
+            f"{job_id} ({len(labels)} matrix combinations, from [{labels[0]}] to [{labels[-1]}])",
+        )
+    for runs_on, jobs in other_os.items():
+        note(differs, f"{', '.join(jobs)} run on {runs_on} in CI, {local} here")
+    return not_run, differs
 
 
 def git_bin():
@@ -224,7 +365,7 @@ def passed_count(output):
     return int(counts[-1]) if counts else 0
 
 
-def summary(sha, results):
+def summary(sha, results, not_run=(), differs=()):
     """The record line: ruff, pytest and readme columns first, then any other kind that ran."""
     columns = []
     for kind in (*KINDS, *sorted({r.kind for r in results} - set(KINDS))):
@@ -237,7 +378,12 @@ def summary(sha, results):
             columns.append(f"pytest {sum(passed_count(r.output) for r in mine)} passed")
         else:
             columns.append(f"{kind} ok")
-    return f"local-ci: {sha} | " + " | ".join(c for c in columns if c)
+    line = f"local-ci: {sha} | " + " | ".join(c for c in columns if c)
+    if not_run:
+        line += " | not run: " + "; ".join(not_run)
+    if differs:
+        line += " | CI environment differs: " + "; ".join(differs)
+    return line
 
 
 def git(repo, *args):
@@ -314,7 +460,8 @@ def main(argv):
         )
         if not result.ok:
             print("\n".join(result.output.splitlines()[-40:]), file=sys.stderr)
-    line = summary(sha, results)
+    not_run, differs = coverage(repo, args.all_matrix)
+    line = summary(sha, results, not_run, differs)
     print(line)
     failed = any(not r.ok for r in results)
     if args.comment and not failed and (error := comment(repo, sha, line)):
@@ -331,6 +478,18 @@ def selftest():
     )
     assert classify("uvx ruff@0.17.1 check") == "ruff" and classify("uv run pytest -q") == "pytest"
     assert classify("cargo test") == "cargo" and classify("") == "step"
+    assert classify('version="${GITHUB_REF_NAME#v}"') == "other" and classify("ls dist") == "ls"
+    matrix = {"matrix": {"os": ["a", "b"], "py": ["1", "2"], "exclude": [{"os": "b", "py": "2"}]}}
+    assert matrix_combos(matrix, True) == [
+        {"os": "a", "py": "1"},
+        {"os": "a", "py": "2"},
+        {"os": "b", "py": "1"},
+    ]
+    included = {"matrix": {"include": [{"name": "x", "os": "u"}, {"name": "y", "os": "w"}]}}
+    assert matrix_combos(included, True) == [{"name": "x", "os": "u"}, {"name": "y", "os": "w"}]
+    assert matrix_combos(included, False) == [{"name": "x", "os": "u"}]
+    extended = {"matrix": {"os": ["a", "b"], "include": [{"os": "a", "extra": "1"}, {"os": "c"}]}}
+    assert matrix_combos(extended, True) == [{"os": "a", "extra": "1"}, {"os": "b"}, {"os": "c"}]
     assert classify("uv run tools/x.py selftest") == "selftest"
     assert called_only({True: {"workflow_call": None}}) and called_only({"on": "workflow_call"})
     assert not called_only({True: {"push": None, "workflow_call": None}})
@@ -392,6 +551,79 @@ jobs:
             assert result.ok and passed_count(result.output) == 4, result
             failing = Step("pytest", "f", "echo broken; exit 3", "bash", ".", {})
             assert not run_step(repo, failing, 60).ok
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        (repo / ".github" / "workflows").mkdir(parents=True)
+        (repo / ".github" / "workflows" / "ci.yml").write_text(
+            """
+on: [push]
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uv run pytest
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uvx ruff check
+      - if: github.event_name == 'push'
+        run: echo only on push
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+  pack:
+    runs-on: windows-latest
+    steps:
+      - uses: PyO3/maturin-action@v1
+      - run: ls dist
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    steps:
+      - run: echo released
+  readme:
+    uses: NaNIsaac/.github/.github/workflows/readme.yml@main
+""",
+            encoding="utf-8",
+        )
+        (repo / "README.md").write_text(
+            "<!-- test -->\n```sh\nx\n```\n<!-- test unix -->\n```sh\ny\n```\n<!-- test unix -->\n```sh\nz\n```\n",
+            encoding="utf-8",
+        )
+        not_run, differs = coverage(repo, local="windows")
+        assert not_run == [
+            "lint: a step with an if: or an expression",
+            "publish: action pypa/gh-action-pypi-publish",
+            "pack: action PyO3/maturin-action",
+            "pack: steps after PyO3/maturin-action",
+            "release (job condition: startsWith(github.ref, 'refs/tags/'))",
+            "readme on linux+macos (the README job runs on all three)",
+            "README unix blocks (2)",
+            "test (2 matrix combinations, from [ubuntu-latest,3.13] to [macos-latest,3.13])",
+        ], not_run
+        # lint and publish run on ubuntu in CI, here on windows; the first test combination is windows
+        assert differs == ["lint, publish run on ubuntu-latest in CI, windows here"], differs
+        not_run_all, _ = coverage(repo, every=True, local="windows")
+        assert not any(n.startswith("test (") for n in not_run_all)
+        _, differs_all = coverage(repo, every=True, local="windows")
+        assert any(d.startswith("test, lint, publish run on ubuntu-latest") for d in differs_all)
+        assert any(d.startswith("test run on macos-latest") for d in differs_all)
+        line = summary(sha, [ok("ruff")], not_run, differs)
+        assert line.startswith(
+            f"local-ci: {sha} | ruff ok | pytest n/a | readme n/a | not run: lint: a step"
+        )
+        assert line.endswith("windows here")
+        assert " | CI environment differs: lint, publish run on" in line
+        assert summary(sha, [ok("ruff")]).endswith(
+            "readme n/a"
+        )  # nothing left out: unchanged format
     print("selftest ok")
 
 
