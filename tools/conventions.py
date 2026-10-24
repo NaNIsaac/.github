@@ -220,6 +220,19 @@ def comment_hits(suffix, text, korean_allowed=False):
     return sorted(hits, key=lambda h: h[1])
 
 
+def read_source(path):
+    """The text of a source file: UTF-8, else CP949 (older Korean files), else UTF-8 with the
+    undecodable bytes replaced. Reading CP949 as UTF-8 would turn every Hangul comment into
+    replacement characters and hide it from the Korean check."""
+    data = path.read_bytes()
+    for encoding in ("utf-8", "cp949"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def third_party(text):
     """Whether the top of a file names a copyright holder other than the owner, which marks
     code copied in from elsewhere (a vendored header) whose comments are not ours to rewrite."""
@@ -240,7 +253,7 @@ def comment_findings(repo, name):
             or not (repo / path).is_file()
         ):
             continue
-        text = (repo / path).read_text(encoding="utf-8", errors="replace")
+        text = read_source(repo / path)
         if third_party(text):
             continue
         for rule, line in comment_hits(suffix, text, name in KOREAN_SUBJECT):
@@ -669,6 +682,14 @@ def selftest():
     assert comment_hits(".ps1", "# ---- setup ----\n") == [("banner", 1)]
     assert comment_hits(".sh", "echo $#\n") == [] and comment_hits(".js", "a = 'x//y';\n") == []
     assert KOREAN_SUBJECT == {"hangeul", "hanfix"}
+    with tempfile.TemporaryDirectory() as tmp:
+        legacy, plain = Path(tmp) / "legacy.cpp", Path(tmp) / "plain.cpp"
+        legacy.write_bytes("// 파일을 읽는다\nint x;\n".encode("cp949"))
+        plain.write_bytes("// 파일을 읽는다\nint x;\n".encode())
+        assert comment_hits(".cpp", read_source(legacy)) == [("korean", 1)]
+        assert read_source(legacy) == read_source(plain)
+        plain.write_bytes(b"// ok \xff\xff\xff\nint x;\n")
+        assert "ok" in read_source(plain)
     assert third_party("/* raylib\n*   Copyright (c) 2013-2022 Ramon Santamaria (@raysan5)\n*/")
     assert third_party("# Copyright 2020 Someone Else\nx = 1\n")
     assert not third_party("# Copyright (c) 2026 Isaac Yong\n") and not third_party(
