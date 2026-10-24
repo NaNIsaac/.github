@@ -39,19 +39,20 @@ from pathlib import Path
 OWNER = "NaNIsaac"
 TIERS = ("low", "medium", "physics")
 DOC = re.compile(
-    r"(^|/)(README[^/]*|CHANGELOG[^/]*|CITATION\.cff|LICENSE[^/]*)$|^docs/.*\.md$", re.I
+    r"(^|/)(README[^/]*|CHANGELOG[^/]*|CITATION\.cff|LICENSE[^/]*)$|^docs/.*\.md$", re.IGNORECASE
 )
 TEST = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$")
 WORKFLOW = re.compile(r"^\.github/workflows/")
 SOURCE = re.compile(r"^src/")
 # Code that is not a test or a helper can change results, wherever it sits (sim.py at the
 # root of a research repo is as much physics as src/).
-CODE = re.compile(r"\.(py|pyx|rs|c|cc|cpp|h|hpp|cu|cuh|js|ts|jl|m|f90)$", re.I)
+CODE = re.compile(r"\.(py|pyx|rs|c|cc|cpp|h|hpp|cu|cuh|js|ts|jl|m|f90)$", re.IGNORECASE)
 HELPER = re.compile(r"^(examples|scripts|benchmarks|tools|notebooks)/")
-PRE_MERGE = re.compile(r"^\s*pre-merge:\s*(.+)$", re.M | re.I)
+PRE_MERGE = re.compile(r"^\s*pre-merge:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 # GitHub's closing keywords; each issue needs its own keyword ("Fixes #1, fixes #2").
 CLOSING = re.compile(
-    rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:{OWNER}/([\w.-]+))?#(\d+)\b", re.I
+    rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:{OWNER}/([\w.-]+))?#(\d+)\b",
+    re.IGNORECASE,
 )
 
 
@@ -130,7 +131,7 @@ def check_state(rollup) -> tuple[str, datetime | None]:
         return "none", None
     states = {(c.get("conclusion") or c.get("status") or "").upper() for c in rollup}
     finished = [c.get("completedAt") for c in rollup if c.get("completedAt")]
-    last = max((datetime.fromisoformat(t.replace("Z", "+00:00")) for t in finished), default=None)
+    last = max((datetime.fromisoformat(t) for t in finished), default=None)
     if states & {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}:
         return "red", last
     if states & {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}:
@@ -145,7 +146,7 @@ def base_moved_at(repo: str, base: str, cache: dict) -> datetime | None:
             date = gh(
                 "api", f"repos/{OWNER}/{repo}/commits/{base}", "--jq", ".commit.committer.date"
             ).strip()
-            cache[key] = datetime.fromisoformat(date.replace("Z", "+00:00"))
+            cache[key] = datetime.fromisoformat(date)
         except subprocess.CalledProcessError:
             cache[key] = None
     return cache[key]
