@@ -5,7 +5,7 @@ Rules that are cheap to follow and cost nothing to keep. `python tools/conventio
 ## Commits
 
 - Conventional commits with one of: `feat fix docs test chore ci build style refactor perf`. Optional scope: `fix(term): ...`. (checked)
-- Subject at most 100 characters, in the imperative, no trailing period. One logical change per commit. (type and length checked)
+- Subject at most 100 characters, in the imperative, no trailing period. One logical change per commit. (type and length checked, for commits made since 2026-10-22: earlier history cannot be rewritten)
 - Author is the repo's `git config user.*`. No AI credit lines. (checked)
 
 ## Branches
@@ -57,3 +57,15 @@ integration branch only adds a place for work to go stale.
 
 - Tag `vX.Y.Z` and write GitHub release notes.
 - Keep a `CHANGELOG.md` only for libraries published to PyPI.
+
+## Exemptions
+
+- A repo that cannot follow a checked rule says so in `.conventions.toml` at its root, with the reason as the value, and `check` stops reporting that rule for it. Only the rules named here can be excused; a rule with an empty reason is not excused.
+
+  ```toml
+  [exempt]
+  readme-tests = "the README steps change this machine and cannot run on CI"
+  readme-language = "the project is about the Korean language and README.md is Korean"
+  ```
+
+  `readme-tests` covers the setup steps (not tested, not run in CI); `readme-language` covers an English `README.md`. The build backend keeps its own declaration, `[tool.conventions] build-backend` in `pyproject.toml`.

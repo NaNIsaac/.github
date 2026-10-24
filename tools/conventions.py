@@ -12,6 +12,7 @@ open a PR from it. Rules that need judgement are reported, not fixed.
 import ast
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,12 @@ LEGACY_EMAILS = (
 OWN_FORKS = {"NaNIsaac.github.io"}
 NO_LICENSE = {".github", "NaNIsaac", "Life"}
 NO_COMMIT_FORMAT = {"Life"}
+# The commit format rule began with the 2026-10-22 clean-up; older history cannot be rewritten.
+COMMIT_FORMAT_SINCE = "2026-10-22"
+# A repo can excuse itself from a rule in .conventions.toml, with the reason as the value:
+#   [exempt]
+#   readme-tests = "the README steps change this machine and cannot run on CI"
+EXEMPT_RULES = {"readme-tests", "readme-language"}
 # Checkouts that are not at ROOT/<name> because that path is taken: ROOT/docs is the notes folder.
 LOCAL_PATHS = {"docs": "docs-site"}
 RUFF_RULES = {"I", "UP", "B"}
@@ -144,6 +151,27 @@ def drop_worktree(repo, path):
     branch = git(path, "branch", "--show-current").strip()
     git(repo, "worktree", "remove", "--force", str(path))
     git(repo, "branch", "-D", branch)
+
+
+def subject_problems(repo):
+    """Subjects among the last 20 non-merge commits since COMMIT_FORMAT_SINCE that break the format."""
+    subjects = git(
+        repo, "log", "-n", "20", "--no-merges", f"--since={COMMIT_FORMAT_SINCE}", "--format=%s"
+    ).splitlines()
+    return [s for s in subjects if not COMMIT_SUBJECT.match(s) or len(s) > 100]
+
+
+def declared_exemptions(repo):
+    """{rule: reason} from the repo's `.conventions.toml`; a rule without a reason does not count."""
+    path = repo / ".conventions.toml"
+    if not path.exists():
+        return {}
+    declared = tomllib.loads(path.read_text(encoding="utf-8")).get("exempt", {})
+    return {
+        rule: reason
+        for rule, reason in declared.items()
+        if rule in EXEMPT_RULES and isinstance(reason, str) and reason.strip()
+    }
 
 
 def hangul_ratio(text):
@@ -579,25 +607,27 @@ def findings(repo, info):
         if (repo / "src").is_dir() and not (repo / "tests").is_dir():
             yield "src/ without tests/", None
 
-    bad = (
-        []
-        if name in NO_COMMIT_FORMAT
-        else [
-            s
-            for s in git(repo, "log", "-n", "20", "--no-merges", "--format=%s").splitlines()
-            if not COMMIT_SUBJECT.match(s) or len(s) > 100
-        ]
-    )
+    bad = [] if name in NO_COMMIT_FORMAT else subject_problems(repo)
     if bad:
-        yield f"{len(bad)} of the last 20 commits break the subject format, e.g. {bad[0]!r}", None
+        yield (
+            (
+                f"{len(bad)} commits since {COMMIT_FORMAT_SINCE} break the subject format, "
+                f"e.g. {bad[0]!r}"
+            ),
+            None,
+        )
+
+    exempt = declared_exemptions(repo)
 
     readme = repo / "README.md"
     if not readme.exists():
         yield "no README.md", None
-    elif hangul_ratio(readme.read_text(encoding="utf-8", errors="replace")) > 0.15:
+    elif "readme-language" not in exempt and (
+        hangul_ratio(readme.read_text(encoding="utf-8", errors="replace")) > 0.15
+    ):
         yield "README.md is not English (move to README.ko.md, write README.md in English)", None
 
-    if readme.exists():
+    if readme.exists() and "readme-tests" not in exempt:
         text = readme.read_text(encoding="utf-8", errors="replace")
         if SETUP_HEADING.search(text):
             if not README_MARK.search(text):
@@ -617,6 +647,30 @@ def findings(repo, info):
 
 def selftest():
     assert hangul_ratio("hello") == 0 and hangul_ratio("한글 abc") > 0.3
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        git(repo, "init", "-q")
+        git(repo, "config", "user.name", "t")
+        git(repo, "config", "user.email", "t@example.com")
+
+        def commit(subject, date):
+            (repo / "f.txt").write_text(subject, encoding="utf-8")
+            git(repo, "add", "f.txt")
+            env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+            subprocess.run(["git", "commit", "-q", "-m", subject], cwd=repo, env=env, check=True)
+
+        commit("Old subject without a type", "2026-10-01T10:00:00")
+        commit("feat: after the cut-off, fine", "2026-10-23T10:00:00")
+        assert subject_problems(repo) == []
+        commit("After the cut-off, wrong", "2026-10-24T10:00:00")
+        assert subject_problems(repo) == ["After the cut-off, wrong"]
+        assert declared_exemptions(repo) == {}
+        (repo / ".conventions.toml").write_text(
+            '[exempt]\nreadme-tests = "changes this machine"\nreadme-language = " "\n'
+            'unknown-rule = "x"\n',
+            encoding="utf-8",
+        )
+        assert declared_exemptions(repo) == {"readme-tests": "changes this machine"}
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp)
         (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
