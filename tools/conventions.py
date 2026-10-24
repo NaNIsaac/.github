@@ -73,6 +73,9 @@ COMMENT_RULES = {
     "emphasis": "Note:/Important: comments",
 }
 SKIPPED_SOURCE = re.compile(r"(^|/)(vendor|third_party|node_modules)/|\.min\.")
+COPYRIGHT_LINE = re.compile(
+    r"[\s/*#;!-]*copyright\s*(?:\(c\)|©|(?=\d{4}))\s*[\d\s,-]*(\S.*)", re.IGNORECASE
+)
 
 MIT = """MIT License
 
@@ -216,6 +219,15 @@ def comment_hits(suffix, text, korean_allowed=False):
     return sorted(hits, key=lambda h: h[1])
 
 
+def third_party(text):
+    """Whether the top of a file names a copyright holder other than the owner, which marks
+    code copied in from elsewhere (a vendored header) whose comments are not ours to rewrite."""
+    for line in text.splitlines()[:120]:
+        if (m := COPYRIGHT_LINE.match(line)) and "isaac" not in m[1].lower():
+            return True
+    return False
+
+
 def comment_findings(repo, name):
     """One message per rule with the count and the first place, over the tracked source files."""
     hits = {}
@@ -228,6 +240,8 @@ def comment_findings(repo, name):
         ):
             continue
         text = (repo / path).read_text(encoding="utf-8", errors="replace")
+        if third_party(text):
+            continue
         for rule, line in comment_hits(suffix, text, name in KOREAN_SUBJECT):
             hits.setdefault(rule, []).append(f"{path}:{line}")
     if unread := hits.get("unparsed"):
@@ -654,6 +668,12 @@ def selftest():
     assert comment_hits(".ps1", "# ---- setup ----\n") == [("banner", 1)]
     assert comment_hits(".sh", "echo $#\n") == [] and comment_hits(".js", "a = 'x//y';\n") == []
     assert KOREAN_SUBJECT == {"hangeul", "hanfix"}
+    assert third_party("/* raylib\n*   Copyright (c) 2013-2022 Ramon Santamaria (@raysan5)\n*/")
+    assert third_party("# Copyright 2020 Someone Else\nx = 1\n")
+    assert not third_party("# Copyright (c) 2026 Isaac Yong\n") and not third_party(
+        "x = 1  # copyright is ours\n"
+    )
+    assert not third_party("# the copyright (c) line is below\n")
 
     # A repo that gets its first workflow from fix_lint gets dependabot.yml in the same commit,
     # because a repo with a workflow is checked for one. ruff itself is stubbed out.
