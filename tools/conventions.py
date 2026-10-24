@@ -74,7 +74,8 @@ COMMENT_RULES = {
 }
 SKIPPED_SOURCE = re.compile(r"(^|/)(vendor|third_party|node_modules)/|\.min\.")
 COPYRIGHT_LINE = re.compile(
-    r"[\s/*#;!-]*copyright\s*(?:\(c\)|©|(?=\d{4}))\s*[\d\s,-]*(\S.*)", re.IGNORECASE
+    r"[\s/*#;!:-]*copyright:?\s*(?:copyright\s*)?(?:\(c\)|©|(?=\d{4}))\s*[\d\s,-]*(\S.*)",
+    re.IGNORECASE,
 )
 
 MIT = """MIT License
@@ -674,6 +675,8 @@ def selftest():
         "x = 1  # copyright is ours\n"
     )
     assert not third_party("# the copyright (c) line is below\n")
+    assert third_party(" * :copyright: Copyright 2007-2024 by the Sphinx team, see AUTHORS.")
+    assert not third_party(" * :copyright: Copyright 2026 Isaac Yong")
 
     # A repo that gets its first workflow from fix_lint gets dependabot.yml in the same commit,
     # because a repo with a workflow is checked for one. ruff itself is stubbed out.
