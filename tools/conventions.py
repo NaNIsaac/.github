@@ -148,23 +148,30 @@ def hangul_ratio(text):
 
 
 def python_comments(text):
-    """(line, text) for each comment and docstring of a Python source, or None when it does not parse."""
+    """(comments, docstrings, parsed) of a Python source, each a list of (line, text).
+
+    Comments come from the tokenizer, which reads syntax this Python does not know. Docstrings
+    need the parser, so a source it rejects (a newer Python than the one running this) has
+    none and `parsed` is False; None replaces the whole result when even tokenizing fails."""
     try:
         comments = [
             (tok.start[0], tok.string[1:].strip())
             for tok in tokenize.generate_tokens(io.StringIO(text).readline)
             if tok.type == tokenize.COMMENT
         ]
-        tree = ast.parse(text)
     except (tokenize.TokenError, SyntaxError):
         return None
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return comments, [], False
     docstrings = [
         (node.body[0].lineno, doc)
         for node in ast.walk(tree)
         if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
         and (doc := ast.get_docstring(node, clean=False))
     ]
-    return comments, docstrings
+    return comments, docstrings, True
 
 
 def line_comments(suffix, text):
@@ -185,16 +192,16 @@ def line_comments(suffix, text):
         if suffix in C_LIKE
         else []
     )
-    return comments, docstrings
+    return comments, docstrings, True
 
 
 def comment_hits(suffix, text, korean_allowed=False):
     """(rule, line) for each breach of the comment rules (BACKLOG rule 27) in one source file."""
     found = python_comments(text) if suffix == ".py" else line_comments(suffix, text)
     if found is None:
-        return []
-    comments, docstrings = found
-    hits = []
+        return [("unparsed", 1)]
+    comments, docstrings, parsed = found
+    hits = [] if parsed else [("unparsed", 1)]
     for line, body in comments:
         if body.startswith(("noqa", "type:")):
             continue
@@ -223,6 +230,12 @@ def comment_findings(repo, name):
         text = (repo / path).read_text(encoding="utf-8", errors="replace")
         for rule, line in comment_hits(suffix, text, name in KOREAN_SUBJECT):
             hits.setdefault(rule, []).append(f"{path}:{line}")
+    if unread := hits.get("unparsed"):
+        print(
+            f"{name}: {len(unread)} Python files could not be parsed by this Python, so their "
+            f"docstrings were not checked (first {unread[0]})",
+            file=sys.stderr,
+        )
     for rule, label in COMMENT_RULES.items():
         if rule in hits:
             yield f"{len(hits[rule])} {label}, first at {hits[rule][0]}"
@@ -626,10 +639,13 @@ def selftest():
         "# ruff: noqa: F401\n",
         "def f():\n    '''Read the file.'''\n",
         "s = '파일'\n",
-        "def broken(:\n",
     )
     for source in clean:
         assert comment_hits(".py", source) == [], (source, comment_hits(".py", source))
+    # a source this Python cannot parse still has its comments checked, and is marked unparsed
+    assert comment_hits(".py", "def broken(:\n") == [("unparsed", 1)]
+    broken = comment_hits(".py", "x = 1\n# 1. 읽기\ny = = 2\n")
+    assert sorted(broken) == sorted([("step", 2), ("korean", 2), ("unparsed", 1)]), broken
     assert comment_hits(".py", "# 파일을 읽는다\n", korean_allowed=True) == []
     assert comment_hits(".py", "# 1. 읽기\n", korean_allowed=True) == [("step", 1)]
     assert comment_hits(".rs", "let x = 1; // Step 1: init\n") == [("step", 1)]
