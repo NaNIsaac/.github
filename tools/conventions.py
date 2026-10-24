@@ -13,7 +13,6 @@ import ast
 import io
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,11 +40,27 @@ COMMIT_SUBJECT = re.compile(
     r"(feat|fix|docs|test|chore|ci|build|style|refactor|perf)(\([\w./-]+\))?!?: \S"
 )
 AI_TRAILER = r"co-authored-by:.*(claude|anthropic)|generated with.*claude"
-SETUP_HEADING = re.compile(r"^#{1,3} .*(install|quick ?start|getting started|setup|설치)", re.I | re.M)
-README_MARK = re.compile(r"^<!-- test( (windows|unix|console))? -->$", re.M)
+SETUP_HEADING = re.compile(
+    r"^#{1,3} .*(install|quick ?start|getting started|setup|설치)", re.IGNORECASE | re.MULTILINE
+)
+README_MARK = re.compile(r"^<!-- test( (windows|unix|console))? -->$", re.MULTILINE)
 # Repos whose subject is the Korean language may keep Korean comments; the other comment rules still apply.
 KOREAN_SUBJECT = {"hangeul", "hanfix"}
-C_LIKE = (".rs", ".js", ".ts", ".tsx", ".jsx", ".c", ".cc", ".cpp", ".cu", ".h", ".hpp", ".go", ".java")
+C_LIKE = (
+    ".rs",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".h",
+    ".hpp",
+    ".go",
+    ".java",
+)
 COMMENT_MARKER = {".py": "#", ".ps1": "#", ".sh": "#"} | dict.fromkeys(C_LIKE, "//")
 HANGUL = re.compile(r"[가-힣]")
 STEP_COMMENT = re.compile(r"(\d+[.)]\s|step\s*\d+\b)", re.IGNORECASE)
@@ -85,7 +100,13 @@ SOFTWARE.
 
 def run(*args, cwd=None):
     return subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     ).stdout
 
 
@@ -104,7 +125,10 @@ def fix_worktree(repo, name):
     git(repo, "fetch", "-q", "origin", "main")
     done = subprocess.run(
         ["git", "worktree", "add", "-q", "-b", branch, str(path), "origin/main"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if done.returncode:
         print(f"{name}: no worktree ({done.stderr.strip()}), fixes skipped")
@@ -153,9 +177,14 @@ def line_comments(suffix, text):
         for number, line in enumerate(text.splitlines(), 1)
         if (m := pattern.search(line))
     ]
-    docstrings = [
-        (text.count("\n", 0, m.start()) + 1, m[0]) for m in re.finditer(r"/\*.*?\*/", text, re.DOTALL)
-    ] if suffix in C_LIKE else []
+    docstrings = (
+        [
+            (text.count("\n", 0, m.start()) + 1, m[0])
+            for m in re.finditer(r"/\*.*?\*/", text, re.DOTALL)
+        ]
+        if suffix in C_LIKE
+        else []
+    )
     return comments, docstrings
 
 
@@ -185,7 +214,11 @@ def comment_findings(repo, name):
     hits = {}
     for path in git(repo, "ls-files", "-z").split("\0"):
         suffix = Path(path).suffix
-        if suffix not in COMMENT_MARKER or SKIPPED_SOURCE.search(path) or not (repo / path).is_file():
+        if (
+            suffix not in COMMENT_MARKER
+            or SKIPPED_SOURCE.search(path)
+            or not (repo / path).is_file()
+        ):
             continue
         text = (repo / path).read_text(encoding="utf-8", errors="replace")
         for rule, line in comment_hits(suffix, text, name in KOREAN_SUBJECT):
@@ -202,20 +235,26 @@ def copyright_years(repo):
 
 
 def fix_license(repo):
-    (repo / "LICENSE").write_text(MIT.format(years=copyright_years(repo), owner=OWNER), encoding="utf-8")
+    (repo / "LICENSE").write_text(
+        MIT.format(years=copyright_years(repo), owner=OWNER), encoding="utf-8"
+    )
     return "docs: add MIT license"
 
 
 def fix_holder(repo, path):
     text = path.read_text(encoding="utf-8")
-    path.write_text(re.sub(r"(Copyright \(c\) [\d-]+ ).+", rf"\g<1>{OWNER}", text, count=1), encoding="utf-8")
+    path.write_text(
+        re.sub(r"(Copyright \(c\) [\d-]+ ).+", rf"\g<1>{OWNER}", text, count=1), encoding="utf-8"
+    )
     return "docs: unify license copyright holder"
 
 
 def fix_gitattributes(repo):
     path = repo / ".gitattributes"
     old = path.read_text(encoding="utf-8") if path.exists() else ""
-    path.write_text(old.rstrip("\n") + ("\n" if old else "") + "* text=auto eol=lf\n", encoding="utf-8")
+    path.write_text(
+        old.rstrip("\n") + ("\n" if old else "") + "* text=auto eol=lf\n", encoding="utf-8"
+    )
     return "chore: normalize line endings"
 
 
@@ -268,9 +307,15 @@ jobs:
 
 
 def baseline_table(rules):
-    lines = ["", "# violations present when ruff became mandatory in CI; remove entries as they are fixed",
-             "[tool.ruff.lint.extend-per-file-ignores]"]
-    lines += [f"{json.dumps(f, ensure_ascii=False)} = {json.dumps(sorted(c))}" for f, c in sorted(rules.items())]
+    lines = [
+        "",
+        "# violations present when ruff became mandatory in CI; remove entries as they are fixed",
+        "[tool.ruff.lint.extend-per-file-ignores]",
+    ]
+    lines += [
+        f"{json.dumps(f, ensure_ascii=False)} = {json.dumps(sorted(c))}"
+        for f, c in sorted(rules.items())
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -296,7 +341,12 @@ def fix_lint(repo):
     workflow.write_text(LINT_WORKFLOW.format(version=version), encoding="utf-8")
     if rules:
         path.write_text(text.rstrip("\n") + "\n" + baseline_table(rules), encoding="utf-8")
-    if subprocess.run(["uvx", f"ruff@{version}", "check", "--no-cache"], cwd=repo, capture_output=True).returncode:
+    if subprocess.run(
+        ["uvx", f"ruff@{version}", "check", "--no-cache"],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+    ).returncode:
         git(repo, "checkout", "--", "pyproject.toml")
         workflow.unlink()
         print(f"{repo.name}: lint reverted, ruff still fails with the baseline")
@@ -317,7 +367,12 @@ def fix_ruff(repo):
 
 def wheel_files(repo, out):
     """Build a wheel into out and return its file names, without the dist-info metadata."""
-    done = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(out), str(repo)], capture_output=True, text=True)
+    done = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(out), str(repo)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     wheels = list(Path(out).glob("*.whl"))
     if done.returncode or not wheels:
         return None
@@ -358,7 +413,9 @@ def backend_excused(repo, backend):
         return True
     # Any other reason is declared in the repo, with the reason as the value.
     declared = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
-    return bool(str(declared.get("tool", {}).get("conventions", {}).get("build-backend", "")).strip())
+    return bool(
+        str(declared.get("tool", {}).get("conventions", {}).get("build-backend", "")).strip()
+    )
 
 
 def fix_uv_build(repo):
@@ -369,7 +426,12 @@ def fix_uv_build(repo):
     module = data["project"]["name"].replace("-", "_").lower()
     tool = data.get("tool", {})
     hatch = tool.get("hatch", {})
-    wheel_packages = hatch.get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [f"src/{module}"])
+    wheel_packages = (
+        hatch.get("build", {})
+        .get("targets", {})
+        .get("wheel", {})
+        .get("packages", [f"src/{module}"])
+    )
     if not (repo / "src" / module / "__init__.py").exists() or "setuptools" in tool:
         print(f"{repo.name}: uv_build skipped, not a plain src/{module} package")
         return None
@@ -378,18 +440,24 @@ def fix_uv_build(repo):
         return None
     version = run("uv", "--version").split()[1]
     minor = int(version.split(".")[1])
-    new = rewrite_tables(text, {
-        "[build-system]": f'[build-system]\nrequires = ["uv_build>={version},<0.{minor + 1}"]\nbuild-backend = "uv_build"\n\n',
-        "[tool.hatch.build.targets.wheel]": "",
-        "[tool.hatch.build.targets.sdist]": "",
-    })
+    new = rewrite_tables(
+        text,
+        {
+            "[build-system]": f'[build-system]\nrequires = ["uv_build>={version},<0.{minor + 1}"]\nbuild-backend = "uv_build"\n\n',
+            "[tool.hatch.build.targets.wheel]": "",
+            "[tool.hatch.build.targets.sdist]": "",
+        },
+    )
     with tempfile.TemporaryDirectory() as tmp:
         before = wheel_files(repo, Path(tmp) / "before")
         path.write_text(new, encoding="utf-8")
         after = wheel_files(repo, Path(tmp) / "after")
     if before is None or after != before:
         git(repo, "checkout", "--", "pyproject.toml")
-        print(f"{repo.name}: uv_build reverted, " + ("current build fails" if before is None else "wheel contents differ"))
+        print(
+            f"{repo.name}: uv_build reverted, "
+            + ("current build fails" if before is None else "wheel contents differ")
+        )
         return None
     return "build: switch to uv_build"
 
@@ -415,7 +483,9 @@ def findings(repo, info):
         yield "no 'text=auto' in .gitattributes", lambda: fix_gitattributes(repo)
 
     authors = set(git(repo, "log", "--all", "--format=%ae%n%ce").split())
-    mailmap = (repo / ".mailmap").read_text(encoding="utf-8") if (repo / ".mailmap").exists() else ""
+    mailmap = (
+        (repo / ".mailmap").read_text(encoding="utf-8") if (repo / ".mailmap").exists() else ""
+    )
     legacy = [e for e in LEGACY_EMAILS if e in authors and e not in mailmap]
     if legacy:
         yield f"former emails in history: {', '.join(legacy)}", lambda: fix_mailmap(repo, legacy)
@@ -432,7 +502,9 @@ def findings(repo, info):
     if workflows.is_dir() and any(workflows.glob("*.yml")):
         if not (repo / ".github" / "dependabot.yml").exists():
             yield "workflows without .github/dependabot.yml", lambda: fix_dependabot(repo)
-        lint = run("uvx", "--quiet", "--from", "actionlint-py", "actionlint", "-oneline", cwd=repo).strip()
+        lint = run(
+            "uvx", "--quiet", "--from", "actionlint-py", "actionlint", "-oneline", cwd=repo
+        ).strip()
         if lint:
             yield f"actionlint: {lint.splitlines()[0]}", None
 
@@ -445,19 +517,36 @@ def findings(repo, info):
         backend = re.search(r'build-backend\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
         if backend and backend[1] != "uv_build" and not backend_excused(repo, backend[1]):
             yield f"build backend is {backend[1]}, not uv_build", lambda: fix_uv_build(repo)
-        lint = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("ruff", {}).get("lint", {})
+        lint = (
+            tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            .get("tool", {})
+            .get("ruff", {})
+            .get("lint", {})
+        )
         missing = RUFF_RULES - set(lint.get("select", [])) - set(lint.get("extend-select", []))
         if "[tool.ruff" in pyproject.read_text(encoding="utf-8") and missing:
             yield f"ruff lint does not select {', '.join(sorted(missing))}", None
         lint_yml = repo / ".github" / "workflows" / "lint.yml"
-        if lint_yml.exists() and "ruff@" in lint_yml.read_text(encoding="utf-8") and "format" not in lint_yml.read_text(encoding="utf-8"):
+        if (
+            lint_yml.exists()
+            and "ruff@" in lint_yml.read_text(encoding="utf-8")
+            and "format" not in lint_yml.read_text(encoding="utf-8")
+        ):
             yield "lint.yml does not run ruff format --check", None
         if not (repo / "uv.lock").exists():
             yield "no uv.lock", None
         if (repo / "src").is_dir() and not (repo / "tests").is_dir():
             yield "src/ without tests/", None
 
-    bad = [] if name in NO_COMMIT_FORMAT else [s for s in git(repo, "log", "-n", "20", "--no-merges", "--format=%s").splitlines() if not COMMIT_SUBJECT.match(s) or len(s) > 100]
+    bad = (
+        []
+        if name in NO_COMMIT_FORMAT
+        else [
+            s
+            for s in git(repo, "log", "-n", "20", "--no-merges", "--format=%s").splitlines()
+            if not COMMIT_SUBJECT.match(s) or len(s) > 100
+        ]
+    )
     if bad:
         yield f"{len(bad)} of the last 20 commits break the subject format, e.g. {bad[0]!r}", None
 
@@ -472,8 +561,10 @@ def findings(repo, info):
         if SETUP_HEADING.search(text):
             if not README_MARK.search(text):
                 yield "README setup steps are not tested (no <!-- test --> blocks)", None
-            elif not any("readme.yml@" in w.read_text(encoding="utf-8", errors="replace")
-                         for w in (repo / ".github" / "workflows").glob("*.yml")):
+            elif not any(
+                "readme.yml@" in w.read_text(encoding="utf-8", errors="replace")
+                for w in (repo / ".github" / "workflows").glob("*.yml")
+            ):
                 yield "README tests are not run in CI (call NaNIsaac/.github readme.yml)", None
 
     for message in comment_findings(repo, name):
@@ -490,16 +581,26 @@ def selftest():
         (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
         assert not backend_excused(repo, "scikit_build_core.build")
         (repo / "CMakeLists.txt").write_text("", encoding="utf-8")
-        assert backend_excused(repo, "scikit_build_core.build") and not backend_excused(repo, "hatchling.build")
-        (repo / "pyproject.toml").write_text("[tool.conventions]\nbuild-backend = 'reason'\n", encoding="utf-8")
+        assert backend_excused(repo, "scikit_build_core.build") and not backend_excused(
+            repo, "hatchling.build"
+        )
+        (repo / "pyproject.toml").write_text(
+            "[tool.conventions]\nbuild-backend = 'reason'\n", encoding="utf-8"
+        )
         assert backend_excused(repo, "hatchling.build")
     src = "[a]\nx = 1\n\n[b]\ny = 2\n\n[c]\nz = 3\n"
     assert rewrite_tables(src, {"[b]": ""}) == "[a]\nx = 1\n\n[c]\nz = 3\n"
     assert baseline_table({"a.py": {"F841", "F401"}}).endswith('["F401", "F841"]\n')
-    assert COMMIT_SUBJECT.match("fix(term): keep the hook") and not COMMIT_SUBJECT.match("Fix the hook")
-    assert README_MARK.search("a\n<!-- test windows -->\n") and not README_MARK.search("x <!-- test -->")
+    assert COMMIT_SUBJECT.match("fix(term): keep the hook") and not COMMIT_SUBJECT.match(
+        "Fix the hook"
+    )
+    assert README_MARK.search("a\n<!-- test windows -->\n") and not README_MARK.search(
+        "x <!-- test -->"
+    )
     assert SETUP_HEADING.search("## Quick install") and not SETUP_HEADING.search("## License")
-    assert MIT.format(years="2026", owner=OWNER).startswith("MIT License\n\nCopyright (c) 2026 Isaac Yong")
+    assert MIT.format(years="2026", owner=OWNER).startswith(
+        "MIT License\n\nCopyright (c) 2026 Isaac Yong"
+    )
     flagged = {
         "# 1. load the file\nx = 1\n": [("step", 1)],
         "x = 1  # Step 2: parse\n": [("step", 1)],
@@ -537,6 +638,7 @@ def selftest():
     assert comment_hits(".ps1", "# ---- setup ----\n") == [("banner", 1)]
     assert comment_hits(".sh", "echo $#\n") == [] and comment_hits(".js", "a = 'x//y';\n") == []
     assert KOREAN_SUBJECT == {"hangeul", "hanfix"}
+
     # A repo that gets its first workflow from fix_lint gets dependabot.yml in the same commit,
     # because a repo with a workflow is checked for one. ruff itself is stubbed out.
     class Done:
@@ -566,7 +668,9 @@ def selftest():
         finally:
             globals()["run"], subprocess.run = real_run, real_sub
         assert subject == "ci: run ruff on every push", subject
-        assert (repo / ".github" / "dependabot.yml").read_text(encoding="utf-8").endswith("# mine\n")
+        assert (
+            (repo / ".github" / "dependabot.yml").read_text(encoding="utf-8").endswith("# mine\n")
+        )
 
 
 def main(argv):
@@ -574,14 +678,26 @@ def main(argv):
         return selftest()
     mode, wanted = (argv[0] if argv else "check"), set(argv[1:])
     sys.stdout.reconfigure(encoding="utf-8")
-    listing = json.loads(run(
-        "gh", "repo", "list", "NaNIsaac", "--limit", "200", "--json",
-        "name,visibility,description,repositoryTopics,defaultBranchRef,isFork,isArchived",
-    ))
+    listing = json.loads(
+        run(
+            "gh",
+            "repo",
+            "list",
+            "NaNIsaac",
+            "--limit",
+            "200",
+            "--json",
+            "name,visibility,description,repositoryTopics,defaultBranchRef,isFork,isArchived",
+        )
+    )
     total = 0
     for info in sorted(listing, key=lambda i: i["name"]):
         name = info["name"]
-        if info["isArchived"] or (info["isFork"] and name not in OWN_FORKS) or (wanted and name not in wanted):
+        if (
+            info["isArchived"]
+            or (info["isFork"] and name not in OWN_FORKS)
+            or (wanted and name not in wanted)
+        ):
             continue
         repo = ROOT / LOCAL_PATHS.get(name, name)
         if not (repo / ".git").exists():
@@ -607,7 +723,13 @@ def main(argv):
                 continue
             after = set(git(work, "status", "--porcelain", "-uall").splitlines()) - before
             touched = [line[3:].split(" -> ")[-1].strip('"') for line in after]
-            if any(not re.match(r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/(workflows/|dependabot\.yml))", p) for p in touched):
+            if any(
+                not re.match(
+                    r"(LICENSE|pyproject\.toml|\.gitattributes|\.mailmap|README[^/]*\.md|\.github/(workflows/|dependabot\.yml))",
+                    p,
+                )
+                for p in touched
+            ):
                 # eol normalization rewrote other files; undo, a tree this noisy needs a manual look
                 git(work, "reset", "-q", "--hard")
                 git(work, "clean", "-fdq", "--", "LICENSE", ".gitattributes", ".mailmap")
