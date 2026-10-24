@@ -61,6 +61,8 @@ def classify(command):
         return "ruff"
     if "pytest" in command:
         return "pytest"
+    if "selftest" in command:
+        return "selftest"
     words = command.split()
     return words[0] if words else "step"
 
@@ -87,11 +89,21 @@ def substitute(text, combo):
     return None if EXPRESSION.search(filled) else filled
 
 
+def called_only(document):
+    """Whether a workflow is triggered only by workflow_call, which makes it a library for others."""
+    triggers = document.get("on", document.get(True))  # YAML reads a bare `on` as true
+    names = [triggers] if isinstance(triggers, str) else list(triggers or [])
+    return names == ["workflow_call"]
+
+
 def workflow_steps(repo, every=False):
     """(steps, skipped) from the workflows of a repo; skipped holds a reason per step left out."""
     steps, skipped = [], []
     for path in sorted((repo / ".github" / "workflows").glob("*.y*ml")):
         document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if called_only(document):
+            skipped.append(f"{path.name}: reusable workflow, not this repo's CI")
+            continue
         for job_id, job in (document.get("jobs") or {}).items():
             if "uses" in job:
                 if README_WORKFLOW.search(job["uses"]):
@@ -319,6 +331,10 @@ def selftest():
     )
     assert classify("uvx ruff@0.17.1 check") == "ruff" and classify("uv run pytest -q") == "pytest"
     assert classify("cargo test") == "cargo" and classify("") == "step"
+    assert classify("uv run tools/x.py selftest") == "selftest"
+    assert called_only({True: {"workflow_call": None}}) and called_only({"on": "workflow_call"})
+    assert not called_only({True: {"push": None, "workflow_call": None}})
+    assert not called_only({True: ["push"]}) and not called_only({})
     assert passed_count("..\n11 passed, 8 warnings in 57s") == 11 and passed_count("no tests") == 0
     assert summary(sha, [ok("ruff"), ok("pytest", "9 passed in 1s"), ok("readme")]) == (
         f"local-ci: {sha} | ruff ok | pytest 9 passed | readme ok"
