@@ -27,6 +27,8 @@ link made earlier does not close anything while the base is not the default bran
 digest flags both and lists the issues that may stay open after their fix is merged.
 """
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -36,6 +38,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 OWNER = "NaNIsaac"
 BOARD = Path(
@@ -129,11 +132,20 @@ def left_open(p: PullRequest) -> list[int]:
     return [n for n in p.fixes if n not in p.linked]
 
 
+class GhError(Exception):
+    """A gh call that failed, with the command and what gh said on stderr."""
+
+
 def gh(*args):
-    out = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, encoding="utf-8", check=True
+    done = subprocess.run(
+        ["gh", *args], check=False, capture_output=True, text=True, encoding="utf-8"
     )
-    return out.stdout
+    if done.returncode:
+        reason = (done.stderr or done.stdout).strip()[-400:] or "no output"
+        message = f"gh {' '.join(args[:4])} exited {done.returncode}: {reason}"
+        print(message, file=sys.stderr)
+        raise GhError(message)
+    return done.stdout
 
 
 def check_state(rollup) -> tuple[str, datetime | None]:
@@ -157,7 +169,7 @@ def base_moved_at(repo: str, base: str, cache: dict) -> datetime | None:
                 "api", f"repos/{OWNER}/{repo}/commits/{base}", "--jq", ".commit.committer.date"
             ).strip()
             cache[key] = datetime.fromisoformat(date)
-        except subprocess.CalledProcessError:
+        except GhError:
             cache[key] = None
     return cache[key]
 
@@ -246,35 +258,46 @@ def list_repo(repo: str) -> list[dict]:
     )
 
 
-def repo_views(repo: str, rows: list[dict], cache: dict, fresh: dict) -> list[dict]:
-    """The `gh pr list` entries of one repository. With a snapshot, a repository whose every PR
-    matches a cached entry is answered from the cache, with the snapshot's mergeable (which is
-    newer than the cached one); otherwise gh is asked and the cache refreshed for its PRs."""
-    hits = [cache.get(f"{repo}#{r['number']}") for r in rows]
-    if rows and all(h and h["key"] == detail_key(r) for h, r in zip(hits, rows, strict=True)):
-        views = []
-        for hit, row in zip(hits, rows, strict=True):
-            fresh[f"{repo}#{row['number']}"] = hit
-            views.append(
-                hit["view"] | {"mergeable": row.get("mergeable") or hit["view"]["mergeable"]}
-            )
-        return views
-    views = list_repo(repo)
-    by_number = {r["number"]: r for r in rows}
-    for view in views:
-        row = by_number.get(view["number"])
-        if row:
-            fresh[f"{repo}#{view['number']}"] = {"key": detail_key(row), "view": view}
-            if row.get("mergeable") in ("MERGEABLE", "CONFLICTING"):
-                view["mergeable"] = row["mergeable"]
+def pr_views(repo: str, rows: list[dict], cache: dict, fresh: dict, failed: dict) -> list[dict]:
+    """The `gh pr` JSON of every open PR of one repository, from the snapshot's rows. A PR whose
+    (head sha, updated, checks) match the last run is taken from the cache; only the others are
+    fetched, one `gh pr view` each, so the heavy fields (files, comments, body) are read for the
+    PRs that changed. The snapshot's mergeable, newer than any cached one, replaces UNKNOWN. A PR
+    gh cannot read is recorded in `failed` and left out."""
+    views = []
+    for row in rows:
+        key = f"{repo}#{row['number']}"
+        hit = cache.get(key)
+        if hit and hit["key"] == detail_key(row):
+            view = hit["view"]
+        else:
+            try:
+                view = json.loads(
+                    gh(
+                        "pr",
+                        "view",
+                        str(row["number"]),
+                        "-R",
+                        f"{OWNER}/{repo}",
+                        "--json",
+                        PR_FIELDS,
+                    )
+                )
+            except GhError as exc:
+                failed[key] = str(exc)
+                continue
+        fresh[key] = {"key": detail_key(row), "view": view}
+        views.append(view | {"mergeable": row.get("mergeable") or view["mergeable"]})
     return views
 
 
-def collect() -> list[PullRequest]:
+def collect(failed: dict | None = None) -> list[PullRequest]:
     """Every open PR of the account. From a fresh snapshot (prs.py) the repositories come
-    without a search, and a repository none of whose PRs changed since the last run is not
-    listed again; without one it is one search and one `gh pr list` per repository. An empty
-    result stops the run, so a failed search cannot be written out as "no open PRs"."""
+    without a search and only the PRs that changed since the last run are fetched; without one
+    it is one search and one `gh pr list` per repository. A repository or PR gh cannot read is
+    recorded in `failed` (name -> reason) and the rest is still collected. An empty result
+    stops the run, so a failed search cannot be written out as "no open PRs"."""
+    failed = {} if failed is None else failed
     snapshot = load_snapshot()
     cache = (read_json(CACHE) or {}) if snapshot else {}
     fresh: dict = {}
@@ -290,13 +313,32 @@ def collect() -> list[PullRequest]:
     }
     prs, base_cache = [], {}
     for repo in repos:
-        listing = repo_views(repo, snapshot[repo], cache, fresh) if snapshot else list_repo(repo)
+        try:
+            listing = (
+                pr_views(repo, snapshot[repo], cache, fresh, failed)
+                if snapshot
+                else list_repo(repo)
+            )
+        except GhError as exc:
+            failed[repo] = str(exc)
+            continue
         for view in listing:
             number = view["number"]
             if view["mergeable"] == "UNKNOWN":  # GitHub has not computed it yet; asking again does
-                view["mergeable"] = json.loads(
-                    gh("pr", "view", str(number), "-R", f"{OWNER}/{repo}", "--json", "mergeable")
-                )["mergeable"]
+                try:
+                    view["mergeable"] = json.loads(
+                        gh(
+                            "pr",
+                            "view",
+                            str(number),
+                            "-R",
+                            f"{OWNER}/{repo}",
+                            "--json",
+                            "mergeable",
+                        )
+                    )["mergeable"]
+                except GhError as exc:
+                    failed[f"{repo}#{number}"] = str(exc)
             changes = [file_change(f) for f in view["files"]]
             checks, last_check = check_state(view["statusCheckRollup"])
             moved = base_moved_at(repo, view["baseRefName"], base_cache)
@@ -363,7 +405,7 @@ def ready(p: PullRequest) -> bool:
     )
 
 
-def digest(prs: list[PullRequest]) -> str:
+def digest(prs: list[PullRequest], failed: dict | None = None) -> str:
     out = [
         f"## 저장소별 (자동 생성 {datetime.now():%Y-%m-%d %H:%M}, `.github/tools/merge_queue.py`)",
         "",
@@ -373,6 +415,11 @@ def digest(prs: list[PullRequest]) -> str:
         "맞지 않는 파일은 한 단계 위로 간다."
     )
     out.append("")
+    if failed:
+        out.append("## 조회 실패 (gh가 읽지 못함, 아래 저장소와 PR은 빠졌거나 불완전하다)")
+        out.append("")
+        out.extend(f"- {name}: {why}" for name, why in sorted(failed.items()))
+        out.append("")
     commands, unclosed = [], []
     # An issue another open PR closes from the default branch is taken care of.
     closed_on_main = {(p.repo, n) for p in prs if p.base == p.default for n in p.linked}
@@ -446,11 +493,13 @@ def write(path: Path, body: str) -> None:
 
 
 def selftest_snapshot():
-    """collect() from a snapshot: no search, a repository whose PRs did not change is not listed
-    again, a changed or missing or old snapshot falls back to gh."""
+    """collect() from a snapshot: no search, no listing, and the heavy fields only for a PR that
+    changed since the last run; a missing or old snapshot falls back to gh; a PR or repository gh
+    cannot read is reported and the rest is still collected."""
     global gh, BOARD, SNAPSHOT, CACHE
     saved = gh, BOARD, SNAPSHOT, CACHE
     calls: list[tuple] = []
+    broken: set[str] = set()
 
     def view(number, head="a"):
         return {
@@ -478,6 +527,10 @@ def selftest_snapshot():
         if args[:2] == ("pr", "list"):
             return json.dumps([view(1)])
         if args[:2] == ("pr", "view"):
+            if broken and args[2] in broken:
+                raise GhError(f"gh pr view {args[2]} exited 1: HTTP 502")
+            if args[-1] == PR_FIELDS:
+                return json.dumps(view(int(args[2])))
             return json.dumps({"mergeable": "MERGEABLE"})
         if args[0] == "api":
             return "2026-01-01T00:00:00+00:00"
@@ -497,8 +550,8 @@ def selftest_snapshot():
         stamp = (at or datetime.now(UTC)).isoformat()
         SNAPSHOT.write_text(json.dumps({"fetched_at": stamp, "prs": rows}), encoding="utf-8")
 
-    def listed():
-        return sum(1 for c in calls if c[:2] == ("pr", "list"))
+    def heavy():
+        return sum(1 for c in calls if c[:2] == ("pr", "view") and c[-1] == PR_FIELDS)
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -511,21 +564,21 @@ def selftest_snapshot():
             calls.clear()
             write([row()])
             first = collect()
-            assert not any(c[:2] == ("search", "prs") for c in calls) and listed() == 1
+            assert not any(c[:2] in (("search", "prs"), ("pr", "list")) for c in calls)
+            assert heavy() == 1 and len(calls) == 3, calls  # repo list, view, base commit date
             assert first[0].mergeable, "the snapshot's mergeable replaces UNKNOWN without a query"
-            assert not any(c[:2] == ("pr", "view") for c in calls)
             calls.clear()
             again = collect()
-            assert listed() == 0 and again[0].number == 1, (
+            assert heavy() == 0 and again[0].number == 1, (
                 "unchanged PRs are answered from the cache"
             )
             calls.clear()
             write([row(sha="s2")])
             collect()
-            assert listed() == 1, "a new head sha lists the repository again"
+            assert heavy() == 1, "a new head sha fetches that PR again"
             calls.clear()
             write([row(sha="s2", mergeable="CONFLICTING")])
-            assert not collect()[0].mergeable and listed() == 0, (
+            assert not collect()[0].mergeable and heavy() == 0, (
                 "mergeable always comes from the snapshot"
             )
             calls.clear()
@@ -534,6 +587,26 @@ def selftest_snapshot():
             assert calls[0][:2] == ("search", "prs"), "an old snapshot is ignored"
             SNAPSHOT.write_text("{", encoding="utf-8")
             assert load_snapshot() is None
+            calls.clear()
+            write([row(sha="s9"), {**row(sha="s9"), "number": 2}])
+            broken.add("1")
+            failed: dict = {}
+            got = collect(failed)
+            assert [p.number for p in got] == [2] and list(failed) == ["r#1"], (got, failed)
+            text = digest(got, failed)
+            assert "## 조회 실패" in text and "r#1: gh pr view 1 exited 1: HTTP 502" in text
+            assert "#2 t" in text, "the PRs gh could read are still in the digest"
+            done = subprocess.CompletedProcess(["gh"], 7, "", "gh said no")
+            with (
+                mock.patch.object(subprocess, "run", return_value=done),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                try:
+                    saved[0]("pr", "list")
+                except GhError as exc:
+                    assert "exited 7: gh said no" in str(exc)
+                else:
+                    raise AssertionError("a failing gh was accepted")
     finally:
         gh, BOARD, SNAPSHOT, CACHE = saved
 
@@ -628,7 +701,11 @@ def selftest():
 def main(argv):
     if argv[:1] == ["selftest"]:
         return selftest()
-    body = digest(collect())
+    failed: dict = {}
+    try:
+        body = digest(collect(failed), failed)
+    except GhError as exc:
+        raise SystemExit(f"merge_queue: {exc}") from exc
     if argv[:1] == ["--write"] and len(argv) == 2:
         write(Path(argv[1]), body)
         print(f"wrote {argv[1]}")
