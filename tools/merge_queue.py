@@ -137,7 +137,9 @@ class GhError(Exception):
 
 
 def gh(*args):
-    done = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8")
+    done = subprocess.run(
+        ["gh", *args], check=False, capture_output=True, text=True, encoding="utf-8"
+    )
     if done.returncode:
         reason = (done.stderr or done.stdout).strip()[-400:] or "no output"
         message = f"gh {' '.join(args[:4])} exited {done.returncode}: {reason}"
