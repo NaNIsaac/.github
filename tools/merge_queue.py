@@ -28,15 +28,25 @@ digest flags both and lists the issues that may stay open after their fix is mer
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 OWNER = "NaNIsaac"
+BOARD = Path(
+    os.environ.get("HERDR_BOARD_DIR")
+    or Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "herdr-board"
+)
+SNAPSHOT = BOARD / "prs.json"
+CACHE = BOARD / "merge-queue-cache.json"
+# prs.py keeps the snapshot fresh to five minutes for its readers; this tool runs every ten, so
+# anything older than half an hour means nobody refreshed it and gh is asked as before.
+SNAPSHOT_MAX_AGE = 1800
 TIERS = ("low", "medium", "physics")
 DOC = re.compile(
     r"(^|/)(README[^/]*|CHANGELOG[^/]*|CITATION\.cff|LICENSE[^/]*)$|^docs/.*\.md$", re.IGNORECASE
@@ -166,10 +176,42 @@ def file_change(f: dict) -> FileChange:
     )
 
 
-def collect() -> list[PullRequest]:
-    """Every open PR of the account: one search, one repository listing, and one `gh pr list`
-    per repository that has any. An empty search stops the run, so a failed search cannot
-    be written out as "no open PRs"."""
+def read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def load_snapshot(now: datetime | None = None) -> dict[str, list[dict]] | None:
+    """The open PRs of OWNER from prs.py's snapshot, by repository name; None when the snapshot
+    is missing, unreadable, empty or older than SNAPSHOT_MAX_AGE."""
+    data = read_json(SNAPSHOT)
+    if not isinstance(data, dict):
+        return None
+    try:
+        age = (
+            (now or datetime.now(UTC)) - datetime.fromisoformat(data["fetched_at"])
+        ).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+    if age > SNAPSHOT_MAX_AGE:
+        return None
+    by_repo: dict[str, list[dict]] = {}
+    for row in data.get("prs") or []:
+        owner, _, name = str(row.get("repo", "")).partition("/")
+        if owner == OWNER and name:
+            by_repo.setdefault(name, []).append(row)
+    return by_repo or None
+
+
+def detail_key(row: dict) -> list:
+    """What must be unchanged for a cached `gh pr list` entry to still describe the PR: any push,
+    edit or comment moves `updated`, and a check run finishing changes `checks`."""
+    return [row.get("head_sha"), row.get("updated"), row.get("checks")]
+
+
+def search_repos() -> list[str]:
     found = json.loads(
         gh(
             "search",
@@ -184,7 +226,59 @@ def collect() -> list[PullRequest]:
             "repository",
         )
     )
-    repos = sorted({item["repository"]["name"] for item in found})
+    return sorted({item["repository"]["name"] for item in found})
+
+
+def list_repo(repo: str) -> list[dict]:
+    return json.loads(
+        gh(
+            "pr",
+            "list",
+            "-R",
+            f"{OWNER}/{repo}",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            PR_FIELDS,
+        )
+    )
+
+
+def repo_views(repo: str, rows: list[dict], cache: dict, fresh: dict) -> list[dict]:
+    """The `gh pr list` entries of one repository. With a snapshot, a repository whose every PR
+    matches a cached entry is answered from the cache, with the snapshot's mergeable (which is
+    newer than the cached one); otherwise gh is asked and the cache refreshed for its PRs."""
+    hits = [cache.get(f"{repo}#{r['number']}") for r in rows]
+    if rows and all(h and h["key"] == detail_key(r) for h, r in zip(hits, rows, strict=True)):
+        views = []
+        for hit, row in zip(hits, rows, strict=True):
+            fresh[f"{repo}#{row['number']}"] = hit
+            views.append(
+                hit["view"] | {"mergeable": row.get("mergeable") or hit["view"]["mergeable"]}
+            )
+        return views
+    views = list_repo(repo)
+    by_number = {r["number"]: r for r in rows}
+    for view in views:
+        row = by_number.get(view["number"])
+        if row:
+            fresh[f"{repo}#{view['number']}"] = {"key": detail_key(row), "view": view}
+            if row.get("mergeable") in ("MERGEABLE", "CONFLICTING"):
+                view["mergeable"] = row["mergeable"]
+    return views
+
+
+def collect() -> list[PullRequest]:
+    """Every open PR of the account. From a fresh snapshot (prs.py) the repositories come
+    without a search, and a repository none of whose PRs changed since the last run is not
+    listed again; without one it is one search and one `gh pr list` per repository. An empty
+    result stops the run, so a failed search cannot be written out as "no open PRs"."""
+    snapshot = load_snapshot()
+    cache = (read_json(CACHE) or {}) if snapshot else {}
+    fresh: dict = {}
+    repos = sorted(snapshot) if snapshot else search_repos()
     if not repos:
         raise SystemExit("merge_queue: the PR search returned nothing; nothing was written")
     defaults = {
@@ -196,20 +290,7 @@ def collect() -> list[PullRequest]:
     }
     prs, base_cache = [], {}
     for repo in repos:
-        listing = json.loads(
-            gh(
-                "pr",
-                "list",
-                "-R",
-                f"{OWNER}/{repo}",
-                "--state",
-                "open",
-                "--limit",
-                "100",
-                "--json",
-                PR_FIELDS,
-            )
-        )
+        listing = repo_views(repo, snapshot[repo], cache, fresh) if snapshot else list_repo(repo)
         for view in listing:
             number = view["number"]
             if view["mergeable"] == "UNKNOWN":  # GitHub has not computed it yet; asking again does
@@ -241,6 +322,11 @@ def collect() -> list[PullRequest]:
                 )
             )
     link(prs)
+    if snapshot:
+        BOARD.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(fresh), encoding="utf-8")
+        tmp.replace(CACHE)
     return prs
 
 
@@ -359,8 +445,102 @@ def write(path: Path, body: str) -> None:
     path.write_text(replace_generated(text, body), encoding="utf-8")
 
 
+def selftest_snapshot():
+    """collect() from a snapshot: no search, a repository whose PRs did not change is not listed
+    again, a changed or missing or old snapshot falls back to gh."""
+    global gh, BOARD, SNAPSHOT, CACHE
+    saved = gh, BOARD, SNAPSHOT, CACHE
+    calls: list[tuple] = []
+
+    def view(number, head="a"):
+        return {
+            "number": number,
+            "title": "t",
+            "url": "u",
+            "baseRefName": "main",
+            "headRefName": head,
+            "files": [
+                {"path": "README.md", "changeType": "MODIFIED", "additions": 1, "deletions": 0}
+            ],
+            "statusCheckRollup": [],
+            "mergeable": "UNKNOWN",
+            "comments": [],
+            "body": "",
+            "closingIssuesReferences": [],
+        }
+
+    def fake_gh(*args):
+        calls.append(args)
+        if args[:2] == ("search", "prs"):
+            return json.dumps([{"repository": {"name": "r"}}])
+        if args[:2] == ("repo", "list"):
+            return json.dumps([{"name": "r", "defaultBranchRef": {"name": "main"}}])
+        if args[:2] == ("pr", "list"):
+            return json.dumps([view(1)])
+        if args[:2] == ("pr", "view"):
+            return json.dumps({"mergeable": "MERGEABLE"})
+        if args[0] == "api":
+            return "2026-01-01T00:00:00+00:00"
+        raise AssertionError(args)
+
+    def row(sha="s1", updated="u1", mergeable="MERGEABLE"):
+        return {
+            "repo": f"{OWNER}/r",
+            "number": 1,
+            "mergeable": mergeable,
+            "checks": None,
+            "head_sha": sha,
+            "updated": updated,
+        }
+
+    def write(rows, at=None):
+        stamp = (at or datetime.now(UTC)).isoformat()
+        SNAPSHOT.write_text(json.dumps({"fetched_at": stamp, "prs": rows}), encoding="utf-8")
+
+    def listed():
+        return sum(1 for c in calls if c[:2] == ("pr", "list"))
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            BOARD = Path(tmp)
+            SNAPSHOT, CACHE = BOARD / "prs.json", BOARD / "merge-queue-cache.json"
+            gh = fake_gh
+            collect()
+            assert calls[0][:2] == ("search", "prs"), "no snapshot: the search runs as before"
+            assert not CACHE.exists()
+            calls.clear()
+            write([row()])
+            first = collect()
+            assert not any(c[:2] == ("search", "prs") for c in calls) and listed() == 1
+            assert first[0].mergeable, "the snapshot's mergeable replaces UNKNOWN without a query"
+            assert not any(c[:2] == ("pr", "view") for c in calls)
+            calls.clear()
+            again = collect()
+            assert listed() == 0 and again[0].number == 1, (
+                "unchanged PRs are answered from the cache"
+            )
+            calls.clear()
+            write([row(sha="s2")])
+            collect()
+            assert listed() == 1, "a new head sha lists the repository again"
+            calls.clear()
+            write([row(sha="s2", mergeable="CONFLICTING")])
+            assert not collect()[0].mergeable and listed() == 0, (
+                "mergeable always comes from the snapshot"
+            )
+            calls.clear()
+            write([row(sha="s2")], at=datetime.now(UTC).replace(year=2020))
+            collect()
+            assert calls[0][:2] == ("search", "prs"), "an old snapshot is ignored"
+            SNAPSHOT.write_text("{", encoding="utf-8")
+            assert load_snapshot() is None
+    finally:
+        gh, BOARD, SNAPSHOT, CACHE = saved
+
+
 def selftest():
-    global gh
+    global gh, SNAPSHOT
+    SNAPSHOT = BOARD / "prs.selftest-absent.json"  # the real snapshot must not answer these
 
     def tier(*changes):
         return pr_tier(
@@ -441,6 +621,7 @@ def selftest():
             assert target.read_text(encoding="utf-8") == "# Q\n\nkeep\n"
     finally:
         gh = real_gh
+    selftest_snapshot()
     print("selftest ok")
 
 
