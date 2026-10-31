@@ -15,3 +15,5 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
       - run: uv run tools/local_ci.py selftest
       - run: uv run --no-project python tools/conventions.py selftest
+      - run: uv run --no-project python -m unittest discover -s tools -p "test_*.py"
+      - run: pwsh -NoProfile -File tools/readme-test-selftest.ps1

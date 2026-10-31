@@ -58,3 +58,21 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           README: ${{ matrix.readme }}
         run: ./.nanisaac/tools/readme-test.ps1 -Readme $env:README
+
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: actions/checkout@v7
+        with:
+          repository: NaNIsaac/.github
+          path: .nanisaac
+          sparse-checkout: tools
+      - name: Marked documentation examples
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./.nanisaac/tools/readme-test.ps1 -Docs

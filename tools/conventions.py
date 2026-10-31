@@ -1,4 +1,4 @@
-"""Repo conventions across D:\\03_Develop\\NaNIsaac.
+"""Repository conventions.
 
     python conventions.py check [repo ...]
     python conventions.py fix   [repo ...]   # commits on a branch in a worktree, never pushes
@@ -39,7 +39,16 @@ COMMIT_FORMAT_SINCE = "2026-10-22"
 # A repo can excuse itself from a rule in .conventions.toml, with the reason as the value:
 #   [exempt]
 #   readme-tests = "the README steps change this machine and cannot run on CI"
-EXEMPT_RULES = {"readme-tests", "readme-language", "ci-concurrency", "ci-macos"}
+EXEMPT_RULES = {
+    "readme-tests",
+    "readme-language",
+    "ci-concurrency",
+    "ci-macos",
+    "readme-structure",
+    "readme-length",
+    "docs-navigation",
+}
+DOCS_PILOTS = {"QoraGeom", "QoraPhase"}
 # Checkouts that are not at ROOT/<name> because that path is taken: ROOT/docs is the notes folder.
 LOCAL_PATHS = {"docs": "docs-site"}
 RUFF_RULES = {"I", "UP", "B"}
@@ -710,6 +719,78 @@ def findings(repo, info):
         yield "AI trailers in history (run deai)", None
 
 
+def documentation_problems(repo):
+    """Return the pilot rules independently of repository metadata and Git history."""
+    exempt = declared_exemptions(repo)
+    readme = repo / "README.md"
+    if readme.exists():
+        text = readme.read_text(encoding="utf-8")
+        if "readme-length" not in exempt and len(text.splitlines()) > 200:
+            yield "readme-length", "README.md exceeds 200 lines; move reference material to docs/"
+        if "readme-structure" not in exempt:
+            headings = []
+            fence = None
+            for line in text.splitlines():
+                if match := re.match(r"^\s*(`{3,}|~{3,})", line):
+                    marker = match[1][0]
+                    fence = None if fence == marker else marker if fence is None else fence
+                elif fence is None and (match := re.match(r"^(#{1,2})\s+(.+?)\s*#*\s*$", line)):
+                    headings.append((len(match[1]), match[2].strip().casefold()))
+            required = ("install", "quick start", "documentation", "license")
+            positions = []
+            for heading in required:
+                aliases = {heading, "installation"} if heading == "install" else {heading}
+                position = next(
+                    (
+                        i
+                        for i, (level, title) in enumerate(headings)
+                        if level == 2 and title in aliases
+                    ),
+                    None,
+                )
+                if position is None:
+                    yield "readme-structure", f"README.md needs a '{heading.title()}' section"
+                else:
+                    positions.append(position)
+            if not headings or headings[0][0] != 1:
+                yield "readme-structure", "README.md must start with a title before its sections"
+            if positions != sorted(positions):
+                yield (
+                    "readme-structure",
+                    "README sections must follow Install, Quick start, Documentation, License",
+                )
+    pages = {p.relative_to(repo / "docs").as_posix() for p in (repo / "docs").rglob("*.md")}
+    if not pages or "docs-navigation" in exempt:
+        return
+    nav = repo / "docs" / "nav.json"
+    try:
+        document = json.loads(nav.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        yield "docs-navigation", "docs/nav.json is missing or invalid"
+        return
+
+    def links(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "link" and isinstance(child, str):
+                    yield child.split("#", 1)[0].split("?", 1)[0].removeprefix("./")
+                else:
+                    yield from links(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from links(child)
+
+    missing = pages - set(links(document))
+    if missing:
+        yield "docs-navigation", "docs pages absent from nav.json: " + ", ".join(sorted(missing))
+
+
+def documentation_findings(repo, name):
+    prefix = "" if name in DOCS_PILOTS else "warning: "
+    for rule, message in documentation_problems(repo):
+        yield f"{prefix}{rule}: {message}", None
+
+
 def selftest():
     cheap = "on:\n  pull_request:\nconcurrency:\n  group: x\njobs: {}\n"
     assert cost_problems("ci.yml", cheap) == []
@@ -901,10 +982,10 @@ def main(argv):
         repo = ROOT / LOCAL_PATHS.get(name, name)
         if not (repo / ".git").exists():
             continue
-        found = list(findings(repo, info))
+        found = list(findings(repo, info)) + list(documentation_findings(repo, name))
         for message, _ in found:
             print(f"{name}: {message}")
-        total += len(found)
+        total += sum(not message.startswith("warning: ") for message, _ in found)
         if mode != "fix":
             continue
         if not any(f for _, f in found):
