@@ -30,6 +30,30 @@ throw 'expected fixture failure'
         try { & $runner -Readme malformed.md -DryRun } catch { $failed = $_ -match 'missing (opening|closing) code fence' }
         if (-not $failed) { throw 'Malformed marked fence was not rejected' }
     }
+    @'
+<!-- test -->
+```powershell
+pwsh -NoProfile -Command 'exit 7'
+Set-Content -Path after-failure.txt -Value unexpected
+```
+'@ | Set-Content native-failure.md
+    $failed = $false
+    try { & $runner -Readme native-failure.md -Force } catch { $failed = $true }
+    if (-not $failed -or (Test-Path after-failure.txt)) { throw 'Native command failure was hidden' }
+    if (Get-Command sh -ErrorAction SilentlyContinue) {
+        @'
+<!-- test -->
+```sh
+false
+printf unexpected > after-failure.txt
+```
+'@ | Set-Content shell-failure.md
+        $failed = $false
+        try { & $runner -Readme shell-failure.md -Force } catch { $failed = $true }
+        if (-not $failed -or (Test-Path after-failure.txt)) { throw 'Shell command failure was hidden' }
+    } else {
+        Write-Host 'skip shell failure fixture: sh is unavailable'
+    }
     Write-Host 'docs runner selftest: passed'
 } finally {
     Pop-Location

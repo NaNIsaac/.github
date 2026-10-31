@@ -1,3 +1,4 @@
+#requires -Version 7.3
 # Runs the setup steps in a README as a new user would, so the README cannot drift from what works.
 # A comment before a fenced block marks it:
 #   <!-- test -->          run the block on any OS
@@ -37,10 +38,10 @@ function Update-Path {
 function Invoke-Block([string]$lang, [string[]]$body) {
     $ps = $lang -eq 'powershell'
     $file = Join-Path ([IO.Path]::GetTempPath()) ("readme-$([Guid]::NewGuid().ToString('n'))." + ($ps ? 'ps1' : 'sh'))
-    Set-Content -Encoding utf8NoBOM $file ($ps ? @('$ErrorActionPreference = ''Stop''') + $body : $body)
+    Set-Content -Encoding utf8NoBOM $file ($ps ? @('$ErrorActionPreference = ''Stop''', '$PSNativeCommandUseErrorActionPreference = $true') + $body : $body)
     $global:LASTEXITCODE = 0
     try {
-        $out = $ps ? (& $pwsh -File $file 2>&1) : (sh $file 2>&1)
+        $out = $ps ? (& $pwsh -File $file 2>&1) : (sh -e $file 2>&1)
         if ($LASTEXITCODE) { throw "exit code ${LASTEXITCODE}`n$($out -join "`n")" }
     } finally { Remove-Item $file -ErrorAction SilentlyContinue }
 }
