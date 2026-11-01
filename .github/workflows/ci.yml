@@ -12,7 +12,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv run tools/local_ci.py selftest
       - run: uv run --no-project python tools/conventions.py selftest
       - run: uv run --no-project python -m unittest discover -s tools -p "test_*.py"
