@@ -49,9 +49,22 @@ integration branch only adds a place for work to go stale.
 
 ## README
 
+- Keep the first screen in this order: title and optional badges, one-line description,
+  representative image when available, Install, Quick start, Documentation, License.
+  Use level-two headings for the last four sections. Keep Quick start to about ten lines.
+- Keep README.md at most 200 lines. Move guides, theory, benchmarks and detailed limitations
+  into docs/, with links from the Documentation section.
 - Install and first-run steps come first, in order, as code blocks. Each block a new user should run is marked with `<!-- test -->` (or `windows`, `unix`, `console`) on the line before it. (checked)
 - CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked)
 - `README.md` is English and `README.ko.md` mirrors it, marks included.
+- Start docs/ with index.md (Overview), install.md, tutorial.md, guides/ and a changelog link.
+  The documentation hub generates the API reference; do not maintain a second hand-written API.
+- Register every Markdown page under docs/ in docs/nav.json, including nested pages.
+  Mark runnable documentation blocks with the same test comments. The shared workflow runs
+  these blocks on Ubuntu only; README platform coverage is unchanged.
+- Structure, length and navigation checks initially warn outside QoraGeom and QoraPhase.
+  Those two pilot repositories enforce them. Content correctness, the one-line introduction,
+  useful image and example length still require review.
 
 ## CI cost
 
@@ -78,4 +91,5 @@ Private repositories get 2,000 included minutes a month, where a Windows minute 
   ```
 
   `ci-concurrency` and `ci-macos` excuse the two CI cost rules.
+  `readme-structure`, `readme-length` and `docs-navigation` excuse the documentation pilot rules.
   `readme-tests` covers the setup steps (not tested, not run in CI); `readme-language` covers an English `README.md`. The build backend keeps its own declaration, `[tool.conventions] build-backend` in `pyproject.toml`.

@@ -237,6 +237,11 @@ def coverage(repo, every=False, local=LOCAL_OS):
                         f"{job_id} on {'+'.join(others)} (the README job runs on all three)",
                     )
                     note(not_run, readme_blocks_not_run(repo, local))
+                    if local != "linux" and any(
+                        README_MARK.search(p.read_text(encoding="utf-8"))
+                        for p in (repo / "docs").rglob("*.md")
+                    ):
+                        note(not_run, "docs marked blocks (Ubuntu only)")
                 else:
                     note(not_run, f"{job_id} (reusable workflow {job['uses']})")
                 continue
@@ -306,6 +311,12 @@ def run_step(repo, step, timeout):
     started = time.monotonic()
     if step.kind == "readme":
         readmes = [r for r in ("README.md", "README.ko.md") if (repo / r).exists()]
+        if LOCAL_OS == "linux":
+            readmes += [
+                str(p.relative_to(repo))
+                for p in sorted((repo / "docs").rglob("*.md"))
+                if README_MARK.search(p.read_text(encoding="utf-8"))
+            ]
         outputs, ok = [], True
         for readme in readmes:
             script = Path(__file__).with_name("readme-test.ps1")
@@ -621,6 +632,14 @@ jobs:
         )
         assert line.endswith("windows here")
         assert " | CI environment differs: lint, publish run on" in line
+        (repo / "docs").mkdir()
+        (repo / "docs" / "example.md").write_text(
+            "<!-- test -->\n```sh\necho ok\n```\n", encoding="utf-8"
+        )
+        with_docs, _ = coverage(repo, local="windows")
+        assert "docs marked blocks (Ubuntu only)" in with_docs
+        linux_docs, _ = coverage(repo, local="linux")
+        assert "docs marked blocks (Ubuntu only)" not in linux_docs
         assert summary(sha, [ok("ruff")]).endswith(
             "readme n/a"
         )  # nothing left out: unchanged format

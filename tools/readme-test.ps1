@@ -1,3 +1,4 @@
+#requires -Version 7.3
 # Runs the setup steps in a README as a new user would, so the README cannot drift from what works.
 # A comment before a fenced block marks it:
 #   <!-- test -->          run the block on any OS
@@ -7,15 +8,24 @@
 # unless -Force is given.   pwsh readme-test.ps1 [-Readme README.ko.md] [-DryRun]
 param(
     [string]$Readme = 'README.md',
+    [switch]$Docs,
     [switch]$DryRun,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
 if (-not ($DryRun -or $Force -or $env:CI)) { throw 'this changes the machine; run it on CI, or pass -DryRun or -Force' }
+if ($Docs) {
+    $pages = @(if (Test-Path docs) { Get-ChildItem docs -Recurse -File -Filter '*.md' | Where-Object { Select-String -LiteralPath $_.FullName -Pattern '^<!-- test( (windows|unix|console))? -->$' -Quiet } })
+    foreach ($page in $pages) {
+        & $PSCommandPath -Readme $page.FullName -DryRun:$DryRun -Force:$Force
+    }
+    Write-Host "docs: $($pages.Count) marked page(s) checked"
+    return
+}
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $os = $IsWindows ? 'windows' : 'unix'
 $pwsh = (Get-Process -Id $PID).Path
-$lines = Get-Content -Encoding utf8 $Readme
+$lines = @(Get-Content -Encoding utf8 $Readme)
 
 # Every block runs in a new process, so a PATH or profile change counts only if it was really saved.
 function Update-Path {
@@ -28,10 +38,10 @@ function Update-Path {
 function Invoke-Block([string]$lang, [string[]]$body) {
     $ps = $lang -eq 'powershell'
     $file = Join-Path ([IO.Path]::GetTempPath()) ("readme-$([Guid]::NewGuid().ToString('n'))." + ($ps ? 'ps1' : 'sh'))
-    Set-Content -Encoding utf8NoBOM $file ($ps ? @('$ErrorActionPreference = ''Stop''') + $body : $body)
+    Set-Content -Encoding utf8NoBOM $file ($ps ? @('$ErrorActionPreference = ''Stop''', '$PSNativeCommandUseErrorActionPreference = $true') + $body : $body)
     $global:LASTEXITCODE = 0
     try {
-        $out = $ps ? (& $pwsh -File $file 2>&1) : (sh $file 2>&1)
+        $out = $ps ? (& $pwsh -File $file 2>&1) : (sh -e $file 2>&1)
         if ($LASTEXITCODE) { throw "exit code ${LASTEXITCODE}`n$($out -join "`n")" }
     } finally { Remove-Item $file -ErrorAction SilentlyContinue }
 }
@@ -64,9 +74,11 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
     $kind = $Matches[2]
     if ($kind -in @('windows', 'unix') -and $kind -ne $os) { continue }
     $start = $i + 1
-    while ($lines[$start] -notmatch '^```') { $start++ }
+    while ($start -lt $lines.Count -and $lines[$start] -notmatch '^```') { $start++ }
+    if ($start -ge $lines.Count) { throw "${Readme}:$($i + 1): missing opening code fence" }
     $end = $start + 1
-    while ($lines[$end] -notmatch '^```') { $end++ }
+    while ($end -lt $lines.Count -and $lines[$end] -notmatch '^```') { $end++ }
+    if ($end -ge $lines.Count) { throw "${Readme}:$($i + 1): missing closing code fence" }
     $body = $lines[($start + 1)..($end - 1)]
     $label = "$(Split-Path -Leaf $Readme):$($i + 1)"
     $ran++
