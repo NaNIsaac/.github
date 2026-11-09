@@ -71,6 +71,8 @@ jobs:
           repository: NaNIsaac/.github
           path: .nanisaac
           sparse-checkout: tools
+      - name: README overview synchronization
+        run: uv run --no-project python .nanisaac/tools/conventions.py --check-overview .
       - name: Marked documentation examples
         shell: pwsh
         env:

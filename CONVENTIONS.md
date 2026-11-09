@@ -59,6 +59,14 @@ integration branch only adds a place for work to go stale.
 - `README.md` is English and `README.ko.md` mirrors it, marks included.
 - Start docs/ with index.md (Overview), install.md, tutorial.md, guides/ and a changelog link.
   The documentation hub generates the API reference; do not maintain a second hand-written API.
+- `docs/index.md` is the overview source. Below the README introduction, keep one generated
+  `<!-- overview:start -->` / `<!-- overview:end -->` block. Its first line links the full
+  documentation hub; its body copies the overview with relative links rebased to the README.
+  Keep the Documentation section short instead of maintaining the overview twice.
+  Run `uv run --no-project python tools/conventions.py --sync-overview <repo-name-or-path>`
+  from the shared tooling checkout after editing the source. `--check-overview` checks drift
+  in the shared README workflow's docs job. It enforces QoraGeom and QoraPhase first and warns
+  elsewhere; repositories without docs/ are not checked.
 - Register every Markdown page under docs/ in docs/nav.json, including nested pages.
   Mark runnable documentation blocks with the same test comments. The shared workflow runs
   these blocks on Ubuntu only; README platform coverage is unchanged.

@@ -1,7 +1,9 @@
-"""Repository conventions.
+"""Repository conventions, documentation checks and overview synchronization.
 
     python conventions.py check [repo ...]
     python conventions.py fix   [repo ...]   # commits on a branch in a worktree, never pushes
+    python conventions.py --sync-overview <repo-name-or-path>
+    python conventions.py --check-overview <repo-name-or-path>
 
 check is read-only. fix handles only the mechanical rules. For each repo with something to
 fix it makes a worktree under _wt/conventions/<repo> on a new branch from origin/main and
@@ -13,6 +15,7 @@ import ast
 import io
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -49,6 +52,8 @@ EXEMPT_RULES = {
     "docs-navigation",
 }
 DOCS_PILOTS = {"QoraGeom", "QoraPhase"}
+OVERVIEW_START = "<!-- overview:start -->"
+OVERVIEW_END = "<!-- overview:end -->"
 # Checkouts that are not at ROOT/<name> because that path is taken: ROOT/docs is the notes folder.
 LOCAL_PATHS = {"docs": "docs-site"}
 RUFF_RULES = {"I", "UP", "B"}
@@ -785,9 +790,138 @@ def documentation_problems(repo):
         yield "docs-navigation", "docs pages absent from nav.json: " + ", ".join(sorted(missing))
 
 
+def overview_destination(target: str) -> str:
+    if target.startswith("<") and target.endswith(">"):
+        return f"<{overview_destination(target[1:-1])}>"
+    if target.startswith("/") or re.match(r"[A-Za-z][\w+.-]*:", target):
+        return target
+    path, suffix = re.match(r"([^?#]*)(.*)", target, re.DOTALL).groups()
+    return posixpath.normpath(posixpath.join("docs", path or "index.md")) + suffix
+
+
+def overview_links(text: str) -> str:
+    """Rebase link destinations without changing code examples or link labels."""
+
+    def prose(value: str) -> str:
+        def links(chunk: str) -> str:
+            out, last = [], 0
+            for match in re.finditer(r"\]\([ \t]*", chunk):
+                start = match.end()
+                if start < last:
+                    continue
+                end, depth = start, 0
+                if chunk[start : start + 1] == "<":
+                    close = chunk.find(">", start + 1)
+                    if close < 0:
+                        continue
+                    end = close + 1
+                else:
+                    while end < len(chunk):
+                        char = chunk[end]
+                        if char == "\\":
+                            end += 2
+                            continue
+                        if char == "(":
+                            depth += 1
+                        elif char == ")":
+                            if not depth:
+                                break
+                            depth -= 1
+                        elif char.isspace() and not depth:
+                            break
+                        end += 1
+                if end > start or chunk[start : start + 1] == ")":
+                    out.extend((chunk[last:start], overview_destination(chunk[start:end])))
+                    last = end
+            chunk = "".join(out) + chunk[last:]
+            chunk = re.sub(
+                r"(?m)^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(<[^>\n]*>|\S+)",
+                lambda m: m[1] + overview_destination(m[2]),
+                chunk,
+            )
+            return re.sub(
+                r"<[A-Za-z][^>\n]*>",
+                lambda tag: re.sub(
+                    r"""(\b(?:href|src)\s*=\s*)(["'])(.*?)\2""",
+                    lambda m: m[1] + m[2] + overview_destination(m[3]) + m[2],
+                    tag[0],
+                    flags=re.IGNORECASE,
+                ),
+                chunk,
+            )
+
+        out, last = [], 0
+        for match in re.finditer(r"(`+).*?\1", value, re.DOTALL):
+            out.extend((links(value[last : match.start()]), match[0]))
+            last = match.end()
+        return "".join(out) + links(value[last:])
+
+    out, pending, fence = [], [], None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            out.append(line)
+            if (
+                marker
+                and marker[1][0] == fence[0]
+                and len(marker[1]) >= len(fence)
+                and not marker[2].strip()
+            ):
+                fence = None
+        elif marker:
+            out.extend((prose("".join(pending)), line))
+            pending = []
+            fence = marker[1]
+        else:
+            pending.append(line)
+    return "".join(out) + prose("".join(pending))
+
+
+def overview_block(repo: Path, name: str) -> str:
+    body = (repo / "docs" / "index.md").read_text(encoding="utf-8")
+    body = re.sub(r"\A---\n.*?\n---(?:\n|$)", "", body, count=1, flags=re.DOTALL).strip()
+    body = re.sub(r"\A# [^\n]+(?:\n|$)", "", body, count=1).strip()
+    hub = f"https://nanisaac.github.io/docs/{name.lower()}/"
+    return f"{OVERVIEW_START}\nFull documentation: [{name}]({hub}).\n\n{overview_links(body)}\n{OVERVIEW_END}"
+
+
+def overview_readme(repo: Path, name: str) -> str:
+    text = (repo / "README.md").read_text(encoding="utf-8")
+    if text.count(OVERVIEW_START) != 1 or text.count(OVERVIEW_END) != 1:
+        raise ValueError("README.md needs exactly one overview block below its introduction")
+    start, end = text.index(OVERVIEW_START), text.index(OVERVIEW_END)
+    if end < start:
+        raise ValueError("README.md overview markers are reversed")
+    if re.search(r"(?m)^##\s", text[:start]):
+        raise ValueError("README.md overview block must precede its sections")
+    return text[:start] + overview_block(repo, name) + text[end + len(OVERVIEW_END) :]
+
+
+def overview_problems(repo: Path, name: str) -> list[tuple[str, str]]:
+    if not (repo / "docs").is_dir():
+        return []
+    try:
+        expected = overview_readme(repo, name)
+        if expected != (repo / "README.md").read_text(encoding="utf-8"):
+            return [
+                (
+                    "docs-overview",
+                    "README.md overview differs from docs/index.md; run --sync-overview",
+                )
+            ]
+    except (OSError, ValueError) as error:
+        message = (
+            str(error)
+            if isinstance(error, ValueError)
+            else "docs/index.md and README.md must be readable"
+        )
+        return [("docs-overview", message)]
+    return []
+
+
 def documentation_findings(repo, name):
     prefix = "" if name in DOCS_PILOTS else "warning: "
-    for rule, message in documentation_problems(repo):
+    for rule, message in [*documentation_problems(repo), *overview_problems(repo, name)]:
         yield f"{prefix}{rule}: {message}", None
 
 
@@ -956,6 +1090,26 @@ def selftest():
 def main(argv):
     if argv[:1] == ["selftest"]:
         return selftest()
+    if argv[:1] in (["--sync-overview"], ["--check-overview"]):
+        if len(argv) != 2:
+            print(f"usage: conventions.py {argv[0]} <repo-name-or-path>", file=sys.stderr)
+            return 2
+        repo = Path(argv[1]) if Path(argv[1]).is_dir() else ROOT / argv[1]
+        remote = git(repo, "remote", "get-url", "origin").strip()
+        name = remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or repo.name
+        if argv[0] == "--sync-overview":
+            try:
+                (repo / "README.md").write_text(overview_readme(repo, name), encoding="utf-8")
+            except (OSError, ValueError) as error:
+                print(f"overview sync failed: {error}", file=sys.stderr)
+                return 1
+            print(f"{name}: README overview synchronized")
+            return 0
+        problems = overview_problems(repo, name)
+        prefix = "" if name in DOCS_PILOTS else "warning: "
+        for rule, message in problems:
+            print(f"{prefix}{name}: {rule}: {message}")
+        return int(bool(problems) and name in DOCS_PILOTS)
     mode, wanted = (argv[0] if argv else "check"), set(argv[1:])
     sys.stdout.reconfigure(encoding="utf-8")
     listing = json.loads(
