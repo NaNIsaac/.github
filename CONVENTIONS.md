@@ -39,7 +39,7 @@ integration branch only adds a place for work to go stale.
 - A package with `src/` has `tests/` run by pytest in CI. (checked)
 - `requires-python` is the lowest version CI actually tests. Packages published to PyPI do not use a pre-release bound.
 - A repo that depends on `genx3` excludes `wxpython` on Linux, because PyPI has no Linux wheel for it and building it fails without GTK headers: `[tool.uv] override-dependencies = ["wxpython; sys_platform != 'linux'"]`. The repo does not start the GenX GUI, so nothing is lost.
-- A repo that takes `torch` from the `pytorch-cu128` index restricts the source with `marker = "sys_platform != 'darwin'"` (or `== 'win32'`), because that index has no macOS wheels and `uv sync` cannot resolve there. The README job runs on macOS for public repos.
+- A repo that takes `torch` from the `pytorch-cu128` index restricts the source with `marker = "sys_platform != 'darwin'"` (or `== 'win32'`), because that index has no macOS wheels and `uv sync` cannot resolve there. The README job runs on macOS for public repos on tags and `workflow_dispatch`.
 
 ## Comments and GitHub text
 
@@ -79,7 +79,7 @@ integration branch only adds a place for work to go stale.
 Private repositories get 2,000 included minutes a month, where a Windows minute counts 2 and a macOS minute 10; when they run out, every private job stops. Public repositories are free, but their macOS runners queue for an hour. So a push should cost one cheap Linux run.
 
 - A workflow that runs on `pull_request` has a `concurrency` group with `cancel-in-progress`, so a newer push replaces the run that is still going. (checked, `ci-concurrency`)
-- macOS (and any other runner that costs more than Linux) runs for a release (a tag) or by hand with `workflow_dispatch`, not on every pull request. A plan job that picks the matrix from `github.ref` keeps the full matrix for the release. (checked, `ci-macos`)
+- macOS (and any other runner that costs more than Linux) runs for a release (a tag) or by hand with `workflow_dispatch`, not on every pull request or branch push. A plan job that picks the matrix from `github.ref` keeps the full matrix for the release. (checked, `ci-macos`)
 - A change that only touches README, CHANGELOG or LICENSE skips the heavy workflow with `paths-ignore`; the README test has its own workflow.
 - Run the checks CI runs before pushing: `uvx ruff@<the pinned version> check` and `format --check`, and the fast tests. A push that fails on lint costs a whole run.
 
