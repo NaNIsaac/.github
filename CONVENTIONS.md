@@ -55,7 +55,7 @@ integration branch only adds a place for work to go stale.
 - Keep README.md at most 200 lines. Move guides, theory, benchmarks and detailed limitations
   into docs/, with links from the Documentation section.
 - Install and first-run steps come first, in order, as code blocks. Each block a new user should run is marked with `<!-- test -->` (or `windows`, `unix`, `console`) on the line before it. (checked)
-- CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked)
+- CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked) A repository whose README installs from the private tendlane repository adds `secrets: inherit`, which gives the workflow the `TENDLANE_READ_TOKEN` it reads that repository with.
 - `README.md` is English and `README.ko.md` mirrors it, marks included.
 - Start docs/ with index.md (Overview), install.md, tutorial.md, guides/ and a changelog link.
   The documentation hub generates the API reference; do not maintain a second hand-written API.

@@ -3,11 +3,15 @@
 #   jobs:
 #     readme:
 #       uses: NaNIsaac/.github/.github/workflows/readme.yml@main
+# and, when its README installs from a private tendlane repository, `secrets: inherit` under `readme:`.
 # README.md and README.ko.md run on separate runners: both hold the same install blocks, and a second
 # run on the same machine fails on what the first one installed ("already installed").
 name: readme
 on:
   workflow_call:
+    secrets:
+      TENDLANE_READ_TOKEN:
+        required: false
 
 # A newer push replaces the run that is still going. The group has its own prefix: the calling
 # workflow's group must not be the same string.
@@ -45,6 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
+      # A caller whose dependencies live in a private repository passes a read-only token with
+      # `secrets: inherit`; without one (forks, public callers) git is left as it is.
+      - name: Private dependencies
+        shell: pwsh
+        env:
+          TENDLANE_READ_TOKEN: ${{ secrets.TENDLANE_READ_TOKEN }}
+        run: |
+          if ($env:TENDLANE_READ_TOKEN) {
+            git config --global url."https://x-access-token:$($env:TENDLANE_READ_TOKEN)@github.com/tendlane/".insteadOf "https://github.com/tendlane/"
+          }
       - uses: actions/checkout@v7
         with:
           repository: NaNIsaac/.github
@@ -66,6 +80,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
+      # A caller whose dependencies live in a private repository passes a read-only token with
+      # `secrets: inherit`; without one (forks, public callers) git is left as it is.
+      - name: Private dependencies
+        shell: pwsh
+        env:
+          TENDLANE_READ_TOKEN: ${{ secrets.TENDLANE_READ_TOKEN }}
+        run: |
+          if ($env:TENDLANE_READ_TOKEN) {
+            git config --global url."https://x-access-token:$($env:TENDLANE_READ_TOKEN)@github.com/tendlane/".insteadOf "https://github.com/tendlane/"
+          }
       - uses: actions/checkout@v7
         with:
           repository: NaNIsaac/.github
