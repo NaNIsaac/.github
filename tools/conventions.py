@@ -175,25 +175,64 @@ def subject_problems(repo):
     return [s for s in subjects if not COMMIT_SUBJECT.match(s) or len(s) > 100]
 
 
+def _has_branch_push(code):
+    """True when the workflow's `on:` triggers on non-tag pushes."""
+    if re.search(r"(?m)^on:[ \t]*(?:push\b|\[[^\]]*\bpush\b)", code):
+        return True
+    on_match = re.search(r"(?m)^on:[ \t]*\r?\n", code)
+    if not on_match:
+        return False
+    after_on = code[on_match.end() :]
+    end_on = re.search(r"(?m)^[^\s]", after_on)
+    on_block = after_on[: end_on.start()] if end_on else after_on
+    push_match = re.search(r"(?m)^([ \t]+)push:[ \t]*(.*)$", on_block)
+    if not push_match:
+        return False
+    inline = push_match[2].strip()
+    if inline:
+        return "branches" in inline or "tags" not in inline
+    indent = push_match[1]
+    sub_lines = []
+    for line in on_block[push_match.end() :].splitlines():
+        if not line.strip():
+            continue
+        lead = len(line) - len(line.lstrip(" \t"))
+        if lead <= len(indent):
+            break
+        sub_lines.append(line.strip())
+    if not sub_lines:
+        return True
+    sub = "\n".join(sub_lines)
+    return bool(re.search(r"(?m)^branches(-ignore)?\s*:", sub)) or not bool(
+        re.search(r"(?m)^tags\s*:", sub)
+    )
+
+
 def cost_problems(name, text):
     """[(rule, message)] for a workflow that burns minutes: a newer push does not cancel the old run,
-    or macOS runs on every pull request (a macOS minute counts ten on a private repository)."""
-    if not re.search(r"(?m)^\s*pull_request(_target)?\s*:|^on:\s*\[[^\]]*pull_request", text):
+    or macOS runs on a pull request or branch push."""
+    code = re.sub(r"(?m)^[ \t]*#.*$", "", text)
+    has_pr = bool(
+        re.search(r"(?m)^\s*pull_request(_target)?\s*:|^on:\s*\[[^\]]*pull_request", code)
+    )
+    has_push = _has_branch_push(code)
+    if not has_pr and not has_push:
         return []
     problems = []
-    calls_shared = re.search(r"uses:\s*NaNIsaac/\.github/\.github/workflows/", text)
-    if "concurrency:" not in text and not calls_shared:
+    calls_shared = re.search(r"uses:\s*NaNIsaac/\.github/\.github/workflows/", code)
+    shared_only = calls_shared and not re.search(r"(?m)^\s*runs-on\s*:", code)
+    if has_pr and not re.search(r"(?m)^\s*concurrency\s*:", code) and not shared_only:
         problems.append(
             (
                 "ci-concurrency",
                 f"{name} runs on pull_request without concurrency, so a newer push does not cancel the old run",
             )
         )
-    if re.search(r"macos", text, re.IGNORECASE) and "refs/tags/" not in text:
+    if re.search(r"macos", code, re.IGNORECASE) and "refs/tags/" not in code:
         problems.append(
             (
                 "ci-macos",
-                f"{name} runs macOS on every pull_request; run it for a release (tag) or by hand",
+                f"{name} runs macOS on pull_request/push; run it for a release (tag) or by hand",
             )
         )
     return problems
@@ -209,18 +248,23 @@ concurrency:
 
 def add_concurrency(text):
     """The workflow text with a concurrency block before its top-level `jobs:`, or None if it cannot be placed."""
-    if "concurrency:" in text:
+    code = re.sub(r"(?m)^[ \t]*#.*$", "", text)
+    if re.search(r"(?m)^\s*concurrency\s*:", code):
         return None
-    match = re.search(r"(?m)^jobs:\s*$", text)
+    match = re.search(r"(?m)^jobs:[ \t]*(?:#.*)?$", text)
     if not match:
         return None
     nl = "\r\n" if "\r\n" in text else "\n"
     return text[: match.start()] + CONCURRENCY.replace("\n", nl) + text[match.start() :]
 
 
+def workflow_files(workflows):
+    return sorted(p for p in workflows.iterdir() if p.suffix in {".yml", ".yaml"} and p.is_file())
+
+
 def fix_concurrency(repo):
     changed = 0
-    for path in sorted((repo / ".github" / "workflows").glob("*.yml")):
+    for path in workflow_files(repo / ".github" / "workflows"):
         text = path.read_text(encoding="utf-8")
         if not any(rule == "ci-concurrency" for rule, _ in cost_problems(path.name, text)):
             continue
@@ -638,7 +682,7 @@ def findings(repo, info):
     if (workflows / "tests.yml").exists() and not (workflows / "ci.yml").exists():
         yield "tests.yml should be ci.yml", lambda: fix_ci_name(repo)
 
-    if workflows.is_dir() and any(workflows.glob("*.yml")):
+    if workflows.is_dir() and workflow_files(workflows):
         if not (repo / ".github" / "dependabot.yml").exists():
             yield "workflows without .github/dependabot.yml", lambda: fix_dependabot(repo)
         lint = run(
@@ -647,7 +691,7 @@ def findings(repo, info):
         if lint:
             yield f"actionlint: {lint.splitlines()[0]}", None
         excused = declared_exemptions(repo)
-        for workflow_file in sorted(workflows.glob("*.yml")):
+        for workflow_file in workflow_files(workflows):
             text = workflow_file.read_text(encoding="utf-8", errors="replace")
             for rule, message in cost_problems(workflow_file.name, text):
                 if rule not in excused:
@@ -937,9 +981,16 @@ def selftest():
     assert (
         cost_problems("release.yml", "on:\n  push:\n    tags: ['v*']\nos: [macos-latest]\n") == []
     )
+    branch_mac = "on:\n  push:\n    branches: [main]\njobs:\n  t:\n    runs-on: macos-latest\n"
+    assert [r for r, _ in cost_problems("ci.yml", branch_mac)] == ["ci-macos"]
+    assert (
+        cost_problems("ci.yml", "on:\n  pull_request:\nconcurrency: x\n# add macOS later\n") == []
+    )
     caller = "on:\n  pull_request:\njobs:\n  readme:\n    uses: NaNIsaac/.github/.github/workflows/readme.yml@main\n"
     assert cost_problems("readme.yml", caller) == []
-    fixed = add_concurrency("on:\n  pull_request:\njobs:\n  a: {}\n")
+    mixed = caller + "  test:\n    runs-on: ubuntu-latest\n"
+    assert [r for r, _ in cost_problems("ci.yml", mixed)] == ["ci-concurrency"]
+    fixed = add_concurrency("on:\n  pull_request:\n# concurrency: none yet\njobs:\n  a: {}\n")
     assert (
         fixed
         and fixed.index("concurrency:") < fixed.index("jobs:")
