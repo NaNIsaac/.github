@@ -651,11 +651,11 @@ def license_findings(repo, info, license_for=frozenset()):
     """Yield (message, fix) pairs for the license rules.
 
     A license is the owner's choice, so neither an MIT license nor a new holder is written unless
-    `license_for` names this repo (`fix --license-for <repo>`); otherwise the finding is reported.
+    `license_for` names this repo; otherwise the finding is reported.
     """
     name = info["name"]
     allowed = name in license_for
-    report_only = f" (report only; fix --license-for {name} writes it)"
+    report_only = " (report only: the license is the owner's choice)"
     licenses = [p for p in repo.glob("LICENSE*") if p.is_file()]
     if not licenses and info["visibility"] == "PUBLIC" and name not in NO_LICENSE:
         if allowed:

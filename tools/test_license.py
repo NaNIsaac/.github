@@ -29,7 +29,8 @@ class LicenseTests(unittest.TestCase):
     def test_without_the_flag_a_missing_license_is_reported_and_nothing_written(self):
         found = list(license_findings(self.repo, INFO))
         self.assertEqual([fix for _, fix in found], [None])
-        self.assertIn("report only; fix --license-for Demo", found[0][0])
+        self.assertIn("report only: the license is the owner's choice", found[0][0])
+        self.assertNotIn("--license-for", found[0][0])
         apply_all(found)
         self.assertEqual(list(self.repo.iterdir()), [])
 
