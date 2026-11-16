@@ -2,7 +2,9 @@
 # calls it: the gates build the fixture and pass all checks as a real repo's call does, the same
 # clean build made in prep passes too, and builds with a credential file name, a
 # key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
-# job, so the run stays green only when each problem is caught). The allow-* jobs check leak-allow
+# job, so the run stays green only when each problem is caught). The path-* jobs check
+# path-allowlist on the planted home folder: the folder itself passes, a prefix of it is another
+# folder and fails, and an entry deeper than a home folder is refused. The allow-* jobs check leak-allow
 # on a build with one key in gates_demo/patterns.py: the right entry and count pass it; no entry,
 # an entry for another rule or the wrong count fail it; and an entry with nothing to match fails a
 # clean build. Nothing
@@ -126,6 +128,36 @@ jobs:
       package-dir: tests/fixtures/gates_demo
       dist-artifact: gates-bad-path
       expect-leak: path
+
+  path-allowed:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-path
+      path-allowlist: /home/builder
+
+  # A prefix of the planted folder is a different folder
+  path-prefix:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-path
+      path-allowlist: /home/build
+      expect-leak: path
+
+  path-not-folder:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-path
+      path-allowlist: /home/builder/cache
+      expect-leak: allow
 
   allow-hit:
     needs: prep

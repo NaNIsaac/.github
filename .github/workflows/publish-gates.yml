@@ -19,6 +19,9 @@
 # sha, not @main, so a change here never alters a repo's gates unseen.
 # The checker code is inline: a called workflow cannot check out its own repository at its own
 # commit without an OIDC token, and these jobs get no id-token.
+# path-allowlist names whole home folders (/home/me, C:\Users\you) used as placeholders in docs;
+# a path is excused only when its home folder equals an entry, so an entry never covers a longer
+# user name that starts the same way.
 # leak-allow excuses a counted number of gitleaks hits of one rule in one file, for a scanner's own
 # patterns or a test fixture that only looks like a secret. Each entry is added in a pull request
 # that names the lines it excuses. The count is exact, so a real key added to an allowed file later
@@ -50,7 +53,9 @@ on:
         type: number
         default: 5
       path-allowlist:
-        description: Newline-separated strings; a home-folder path that contains one of them is allowed.
+        description: >-
+          Newline-separated home folders, each a whole one such as /home/me or C:\Users\you; a
+          home-folder path in the files is allowed when its folder equals an entry (/ and \ alike).
         type: string
         default: ""
       leak-allow:
@@ -167,10 +172,17 @@ jobs:
                    "oauth_creds.json", ".pypirc", ".netrc", "*.pem", "*.key", "*.p12", "*.pfx",
                    "id_rsa*", "id_ed25519*"]
           home = re.compile(r"[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[^\\/\s\"'<>]+|/home/[^/\s\"'<>]+|/Users/[^/\s\"'<>]+")
-          allow = [a.strip() for a in os.environ["PATH_ALLOWLIST"].splitlines() if a.strip()]
+          def folder(path):
+              return re.sub(r"[\\/]+", "/", path)
+          found, allow = [], set()
+          # A whole folder, not a substring, so /home/m does not also excuse /home/max
+          for entry in filter(None, map(str.strip, os.environ["PATH_ALLOWLIST"].splitlines())):
+              if home.fullmatch(entry):
+                  allow.add(folder(entry))
+              else:
+                  found.append(("allow", entry, r"not a home folder such as /home/<name> or C:\Users\<name>"))
           limit = float(os.environ["MAX_FILE_MB"]) * 1024 * 1024
           root = pathlib.Path("unpacked")
-          found = []
           for path in sorted(p for p in root.rglob("*") if p.is_file()):
               rel = path.relative_to(root).as_posix()
               if any(fnmatch.fnmatch(path.name, n) for n in names):
@@ -181,7 +193,7 @@ jobs:
               if b"\0" in data[:8192]:
                   continue
               hits = [m for m in home.findall(data.decode("utf-8", "replace"))
-                      if not any(a in m for a in allow)]
+                      if folder(m) not in allow]
               if hits:
                   found.append(("path", rel, f"{len(hits)} home-folder path(s)"))
           entries = []
