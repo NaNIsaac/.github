@@ -19,6 +19,9 @@
 # sha, not @main, so a change here never alters a repo's gates unseen.
 # The checker code is inline: a called workflow cannot check out its own repository at its own
 # commit without an OIDC token, and these jobs get no id-token.
+# leak-allow excuses one gitleaks hit in one file, for a scanner's own patterns or a test fixture
+# that only looks like a secret. Each entry is added in a pull request that names the lines it
+# excuses; an entry that matches nothing fails the leak job, so it goes when the code it excuses goes.
 name: publish-gates
 on:
   workflow_call:
@@ -49,13 +52,22 @@ on:
         description: Newline-separated strings; a home-folder path that contains one of them is allowed.
         type: string
         default: ""
+      leak-allow:
+        description: >-
+          One "<path>: <rule id>" per line: a gitleaks hit of that rule in that file is printed as
+          allowed instead of failing. The path is the file's path inside the package (a folder and
+          a file at least, no globs), matched as a suffix on a path-segment boundary in the sdist
+          and the wheel. Only for scanner patterns and test fixtures (see the header).
+        type: string
+        default: ""
       dist-artifact:
         description: Check this artifact of the calling run instead of building (publish-gates-selftest.yml).
         type: string
         default: ""
       expect-leak:
         description: >-
-          For publish-gates-selftest.yml only: name, key or path. The leak job then passes only
+          For publish-gates-selftest.yml only: name, key, path or allow (a leak-allow entry that
+          is malformed or matched nothing). The leak job then passes only
           when the check finds that kind of problem, and test and install do not run.
         type: string
         default: ""
@@ -143,6 +155,7 @@ jobs:
         env:
           MAX_FILE_MB: ${{ inputs.max-file-mb }}
           PATH_ALLOWLIST: ${{ inputs.path-allowlist }}
+          LEAK_ALLOW: ${{ inputs.leak-allow }}
           EXPECT_LEAK: ${{ inputs.expect-leak }}
         run: |
           import fnmatch, json, os, pathlib, re
@@ -168,9 +181,36 @@ jobs:
                       if not any(a in m for a in allow)]
               if hits:
                   found.append(("path", rel, f"{len(hits)} home-folder path(s)"))
+          entries = []
+          for line in os.environ["LEAK_ALLOW"].splitlines():
+              if not line.strip():
+                  continue
+              where, sep, rule = line.strip().rpartition(":")
+              where, rule = where.strip().strip("/"), rule.strip()
+              if not sep or not rule or "/" not in where or any(c in where for c in "*?[]"):
+                  found.append(("allow", line.strip(), 'not "<folder>/<file>: <rule id>"'))
+              else:
+                  entries.append([where, rule, 0])
+          allowed = []
           report = pathlib.Path(os.environ["RUNNER_TEMP"], "gitleaks.json")
           for leak in json.loads(report.read_text(encoding="utf-8") or "[]"):
-              found.append(("key", pathlib.Path(leak["File"]).relative_to(root).as_posix(), leak["RuleID"]))
+              rel = pathlib.Path(leak["File"]).relative_to(root).as_posix()
+              entry = next((e for e in entries if leak["RuleID"] == e[1]
+                            and (rel == e[0] or rel.endswith("/" + e[0]))), None)
+              if entry:
+                  entry[2] += 1
+                  allowed.append(f"{rel}:{leak['StartLine']}: {leak['RuleID']}")
+              else:
+                  found.append(("key", rel, leak["RuleID"]))
+          for where, rule, hits in entries:
+              if not hits:
+                  found.append(("allow", f"{where}: {rule}", "matched no gitleaks hit; remove the entry"))
+          for hit in allowed:
+              print(f"allowed: {hit}")
+          if allowed:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("### gitleaks hits allowed by leak-allow\n\n")
+                  summary.writelines(f"- `{hit}`\n" for hit in allowed)
           for kind, rel, why in found:
               print(f"{kind}: {rel}: {why}")
           expect = os.environ["EXPECT_LEAK"]
