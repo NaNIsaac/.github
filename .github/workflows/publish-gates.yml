@@ -19,9 +19,10 @@
 # sha, not @main, so a change here never alters a repo's gates unseen.
 # The checker code is inline: a called workflow cannot check out its own repository at its own
 # commit without an OIDC token, and these jobs get no id-token.
-# leak-allow excuses one gitleaks hit in one file, for a scanner's own patterns or a test fixture
-# that only looks like a secret. Each entry is added in a pull request that names the lines it
-# excuses; an entry that matches nothing fails the leak job, so it goes when the code it excuses goes.
+# leak-allow excuses a counted number of gitleaks hits of one rule in one file, for a scanner's own
+# patterns or a test fixture that only looks like a secret. Each entry is added in a pull request
+# that names the lines it excuses. The count is exact, so a real key added to an allowed file later
+# still fails, and an entry that matches nothing fails, so it goes when the code it excuses goes.
 name: publish-gates
 on:
   workflow_call:
@@ -54,10 +55,12 @@ on:
         default: ""
       leak-allow:
         description: >-
-          One "<path>: <rule id>" per line: a gitleaks hit of that rule in that file is printed as
-          allowed instead of failing. The path is the file's path inside the package (a folder and
-          a file at least, no globs), matched as a suffix on a path-segment boundary in the sdist
-          and the wheel. Only for scanner patterns and test fixtures (see the header).
+          One "<path>: <rule id>: <count>" per line: each file the path matches must have exactly
+          count gitleaks hits of that rule (a whole number, 1 or more), and those hits are printed
+          as allowed instead of failing; more or fewer fails. The path is the file's path inside the
+          package (a folder and a file at least, no globs), matched as a suffix on a path-segment
+          boundary in the sdist and the wheel. Only for scanner patterns and test fixtures (see the
+          header).
         type: string
         default: ""
       dist-artifact:
@@ -185,26 +188,31 @@ jobs:
           for line in os.environ["LEAK_ALLOW"].splitlines():
               if not line.strip():
                   continue
-              where, sep, rule = line.strip().rpartition(":")
-              where, rule = where.strip().strip("/"), rule.strip()
-              if not sep or not rule or "/" not in where or any(c in where for c in "*?[]"):
-                  found.append(("allow", line.strip(), 'not "<folder>/<file>: <rule id>"'))
+              where, rule, count = ([*map(str.strip, line.strip().rsplit(":", 2))] + ["", ""])[:3]
+              where = where.strip("/")
+              if (not rule or not count.isdigit() or int(count) < 1 or "/" not in where
+                      or any(c in where for c in "*?[]")):
+                  found.append(("allow", line.strip(), 'not "<folder>/<file>: <rule id>: <count>"'))
               else:
-                  entries.append([where, rule, 0])
-          allowed = []
+                  entries.append((where, rule, int(count)))
           report = pathlib.Path(os.environ["RUNNER_TEMP"], "gitleaks.json")
-          for leak in json.loads(report.read_text(encoding="utf-8") or "[]"):
-              rel = pathlib.Path(leak["File"]).relative_to(root).as_posix()
-              entry = next((e for e in entries if leak["RuleID"] == e[1]
-                            and (rel == e[0] or rel.endswith("/" + e[0]))), None)
-              if entry:
-                  entry[2] += 1
-                  allowed.append(f"{rel}:{leak['StartLine']}: {leak['RuleID']}")
-              else:
-                  found.append(("key", rel, leak["RuleID"]))
-          for where, rule, hits in entries:
-              if not hits:
+          leaks = [(pathlib.Path(leak["File"]).relative_to(root).as_posix(), leak["RuleID"], leak["StartLine"])
+                   for leak in json.loads(report.read_text(encoding="utf-8") or "[]")]
+          files = [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()]
+          excused, allowed = set(), []
+          for where, rule, count in entries:
+              matched = sorted(f for f in files if f == where or f.endswith("/" + where))
+              hits = {f: [leak for leak in leaks if leak[0] == f and leak[1] == rule] for f in matched}
+              if not any(hits.values()):
                   found.append(("allow", f"{where}: {rule}", "matched no gitleaks hit; remove the entry"))
+                  continue
+              for f, file_hits in hits.items():
+                  excused.update(file_hits)
+                  if len(file_hits) == count:
+                      allowed += [f"{f}:{line}: {rule}" for _, _, line in file_hits]
+                  else:
+                      found.append(("allow", f"{f}: {rule}", f"expected {count} hit(s), found {len(file_hits)}"))
+          found += [("key", f, rule) for f, rule, line in leaks if (f, rule, line) not in excused]
           for hit in allowed:
               print(f"allowed: {hit}")
           if allowed:
