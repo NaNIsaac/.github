@@ -2,13 +2,15 @@
 
     python conventions.py check [repo ...]
     python conventions.py fix   [repo ...]   # commits on a branch in a worktree, never pushes
+    python conventions.py fix --license-for <repo> [repo ...]   # also the license rules, there only
     python conventions.py --sync-overview <repo-name-or-path>
     python conventions.py --check-overview <repo-name-or-path>
 
 check is read-only. fix handles only the mechanical rules. For each repo with something to
 fix it makes a worktree under _wt/conventions/<repo> on a new branch from origin/main and
 commits there, so the shared checkout and its main are never touched; push the branch and
-open a PR from it. Rules that need judgement are reported, not fixed.
+open a PR from it. Rules that need judgement are reported, not fixed; the license rules (a
+missing LICENSE, another copyright holder) count as such unless --license-for names the repo.
 """
 
 import ast
@@ -645,21 +647,40 @@ def fix_uv_build(repo):
     return "build: switch to uv_build"
 
 
-def findings(repo, info):
+def license_findings(repo, info, license_for=frozenset()):
+    """Yield (message, fix) pairs for the license rules.
+
+    A license is the owner's choice, so neither an MIT license nor a new holder is written unless
+    `license_for` names this repo (`fix --license-for <repo>`); otherwise the finding is reported.
+    """
+    name = info["name"]
+    allowed = name in license_for
+    report_only = f" (report only; fix --license-for {name} writes it)"
+    licenses = [p for p in repo.glob("LICENSE*") if p.is_file()]
+    if not licenses and info["visibility"] == "PUBLIC" and name not in NO_LICENSE:
+        if allowed:
+            yield "public repo without LICENSE", lambda: fix_license(repo)
+        else:
+            yield "public repo without LICENSE" + report_only, None
+    for path in licenses:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        holder = re.search(r"Copyright \(c\) [\d-]+ (.+)", text)
+        if text.startswith("MIT License") and holder and holder[1].strip() != OWNER:
+            message = f"copyright holder is {holder[1].strip()!r}"
+            if allowed:
+                yield message, lambda p=path: fix_holder(repo, p)
+            else:
+                yield message + report_only, None
+
+
+def findings(repo, info, license_for=frozenset()):
     """Yield (message, fix) pairs; fix is a zero-argument callable or None."""
     name = info["name"]
 
     if info["defaultBranchRef"]["name"] != "main":
         yield f"default branch is {info['defaultBranchRef']['name']}", None
 
-    licenses = [p for p in repo.glob("LICENSE*") if p.is_file()]
-    if not licenses and info["visibility"] == "PUBLIC" and name not in NO_LICENSE:
-        yield "public repo without LICENSE", lambda: fix_license(repo)
-    for path in licenses:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        holder = re.search(r"Copyright \(c\) [\d-]+ (.+)", text)
-        if text.startswith("MIT License") and holder and holder[1].strip() != OWNER:
-            yield f"copyright holder is {holder[1].strip()!r}", lambda p=path: fix_holder(repo, p)
+    yield from license_findings(repo, info, license_for)
 
     attrs = repo / ".gitattributes"
     if not attrs.exists() or "text=auto" not in attrs.read_text(encoding="utf-8", errors="replace"):
@@ -1161,7 +1182,16 @@ def main(argv):
         for rule, message in problems:
             print(f"{prefix}{name}: {rule}: {message}")
         return int(bool(problems) and name in DOCS_PILOTS)
-    mode, wanted = (argv[0] if argv else "check"), set(argv[1:])
+    mode, rest = (argv[0] if argv else "check"), list(argv[1:])
+    license_for = set()
+    while "--license-for" in rest:
+        at = rest.index("--license-for")
+        if at + 1 >= len(rest):
+            print("usage: conventions.py fix --license-for <repo> [repo ...]", file=sys.stderr)
+            return 2
+        license_for.add(rest.pop(at + 1))
+        rest.pop(at)
+    wanted = set(rest)
     sys.stdout.reconfigure(encoding="utf-8")
     listing = json.loads(
         run(
@@ -1187,7 +1217,7 @@ def main(argv):
         repo = ROOT / LOCAL_PATHS.get(name, name)
         if not (repo / ".git").exists():
             continue
-        found = list(findings(repo, info)) + list(documentation_findings(repo, name))
+        found = list(findings(repo, info, license_for)) + list(documentation_findings(repo, name))
         for message, _ in found:
             print(f"{name}: {message}")
         total += sum(not message.startswith("warning: ") for message, _ in found)
@@ -1199,7 +1229,7 @@ def main(argv):
         if work is None:
             continue
         # Each fix is bound to the path it was found in, so find them again in the worktree.
-        fixes = [f for _, f in findings(work, info) if f]
+        fixes = [f for _, f in findings(work, info, license_for) if f]
         committed = 0
         for fix in fixes:
             before = set(git(work, "status", "--porcelain", "-uall").splitlines())
