@@ -2,8 +2,11 @@
 # calls it: the gates build the fixture and pass all checks as a real repo's call does, the same
 # clean build made in prep passes too, and builds with a credential file name, a
 # key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
-# job, so the run stays green only when each problem is caught). Nothing key-shaped is stored in
-# the repository: the planted key is random and made in the prep job.
+# job, so the run stays green only when each problem is caught). The allow-* jobs check leak-allow
+# on a build with one key in gates_demo/patterns.py: the right entry and count pass it; no entry,
+# an entry for another rule or the wrong count fail it; and an entry with nothing to match fails a
+# clean build. Nothing
+# key-shaped is stored in the repository: the planted keys are random and made in the prep job.
 name: publish-gates-selftest
 on:
   pull_request:
@@ -31,6 +34,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
       - run: uv build --out-dir "$GITHUB_WORKSPACE/clean"
+        working-directory: tests/fixtures/gates_demo
+      - name: Build again with a key in a source file, for the leak-allow cases
+        shell: python
+        run: |
+          import pathlib, secrets, string
+          alphabet = string.ascii_letters + string.digits
+          key = "ghp_" + "".join(secrets.choice(alphabet) for _ in range(36))
+          pathlib.Path("tests/fixtures/gates_demo/src/gates_demo/patterns.py").write_text(f'SAMPLE = "{key}"\n')
+      - run: uv build --out-dir "$GITHUB_WORKSPACE/allow"
         working-directory: tests/fixtures/gates_demo
       - name: Plant one problem per copy of the wheel
         shell: python
@@ -66,6 +78,10 @@ jobs:
         with:
           name: gates-bad-path
           path: bad-path/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-allow
+          path: allow/
 
   # The path a real repo takes: the gates build the fixture themselves and pass publish-gates-dist on.
   built:
@@ -110,3 +126,51 @@ jobs:
       package-dir: tests/fixtures/gates_demo
       dist-artifact: gates-bad-path
       expect-leak: path
+
+  allow-hit:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-allow
+      leak-allow: "gates_demo/patterns.py: github-pat: 1"
+
+  allow-missing:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-allow
+      expect-leak: key
+
+  allow-other-rule:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-allow
+      leak-allow: "gates_demo/patterns.py: private-key: 1"
+      expect-leak: key
+
+  allow-stale:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-clean
+      leak-allow: "gates_demo/patterns.py: github-pat: 1"
+      expect-leak: allow
+
+  allow-count:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-allow
+      leak-allow: "gates_demo/patterns.py: github-pat: 2"
+      expect-leak: allow
