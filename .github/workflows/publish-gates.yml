@@ -56,6 +56,7 @@ on:
         description: >-
           Newline-separated home folders, each a whole one such as /home/me or C:\Users\you; a
           home-folder path in the files is allowed when its folder equals an entry (/ and \ alike).
+          Punctuation, a closing backtick or a closing bracket right after the name is ignored.
         type: string
         default: ""
       leak-allow:
@@ -193,7 +194,7 @@ jobs:
               if b"\0" in data[:8192]:
                   continue
               hits = [m for m in home.findall(data.decode("utf-8", "replace"))
-                      if folder(m) not in allow]
+                      if folder(m.rstrip(".,;:!?)]}`")) not in allow]
               if hits:
                   found.append(("path", rel, f"{len(hits)} home-folder path(s)"))
           entries = []

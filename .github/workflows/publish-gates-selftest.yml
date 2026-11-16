@@ -55,7 +55,9 @@ jobs:
               "name": ("gates_demo/.env", "DEMO=1\n"),
               "key": ("gates_demo/settings.py",
                       'TOKEN = "ghp_' + "".join(secrets.choice(alphabet) for _ in range(36)) + '"\n'),
-              "path": ("gates_demo/where.txt", "/" + "home/" + "builder/cache\n"),
+              # the second form is how a README quotes it: in backticks, ending a sentence
+              "path": ("gates_demo/where.txt",
+                       "/" + "home/" + "builder/cache\nsee `/" + "home/" + "builder`.\n"),
           }
           for kind, (member, text) in plants.items():
               out = pathlib.Path(f"bad-{kind}")
