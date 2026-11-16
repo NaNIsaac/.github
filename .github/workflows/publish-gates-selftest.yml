@@ -1,5 +1,6 @@
 # Proves publish-gates.yml on the fixture package in tests/fixtures/gates_demo before any repo
-# calls it: the clean build passes all three checks, and builds with a credential file name, a
+# calls it: the gates build the fixture and pass all checks as a real repo's call does, the same
+# clean build made in prep passes too, and builds with a credential file name, a
 # key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
 # job, so the run stays green only when each problem is caught). Nothing key-shaped is stored in
 # the repository: the planted key is random and made in the prep job.
@@ -65,6 +66,14 @@ jobs:
         with:
           name: gates-bad-path
           path: bad-path/
+
+  # The path a real repo takes: the gates build the fixture themselves and pass publish-gates-dist on.
+  built:
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      smoke: python -m gates_demo
 
   clean:
     needs: prep
