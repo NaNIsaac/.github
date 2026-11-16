@@ -1,0 +1,229 @@
+# Reusable: the checks a release must pass before its publish job uploads to PyPI. A repo calls it
+# from its own publish.yml, which keeps its name and its upload job (PyPI Trusted Publisher is
+# registered on that file and the `release` environment):
+#   jobs:
+#     gates:
+#       uses: NaNIsaac/.github/.github/workflows/publish-gates.yml@<commit sha>
+#       with:
+#         import-name: qorageom
+#     publish:
+#       needs: gates
+#       ...
+#       steps:
+#         - uses: actions/download-artifact@v8
+#           with:
+#             name: publish-gates-dist
+#             path: dist
+#         - uses: pypa/gh-action-pypi-publish@release/v1
+# The publish job uploads the files these jobs checked instead of building again. Pin a commit
+# sha, not @main, so a change here never alters a repo's gates unseen.
+# The checker code is inline: a called workflow cannot check out its own repository at its own
+# commit without an OIDC token, and these jobs get no id-token.
+name: publish-gates
+on:
+  workflow_call:
+    inputs:
+      import-name:
+        description: Module the install check imports.
+        required: true
+        type: string
+      package-dir:
+        description: Folder with the pyproject.toml, relative to the repository root.
+        type: string
+        default: .
+      python-version:
+        type: string
+        default: "3.13"
+      test-command:
+        type: string
+        default: uv run pytest -q
+      smoke:
+        description: One command run in the installed environment after the import, e.g. "witnox --help".
+        type: string
+        default: ""
+      max-file-mb:
+        description: A file in the sdist or wheel larger than this fails the leak check.
+        type: number
+        default: 5
+      path-allowlist:
+        description: Newline-separated strings; a home-folder path that contains one of them is allowed.
+        type: string
+        default: ""
+      dist-artifact:
+        description: Check this artifact of the calling run instead of building (publish-gates-selftest.yml).
+        type: string
+        default: ""
+      expect-leak:
+        description: >-
+          For publish-gates-selftest.yml only: name, key or path. The leak job then passes only
+          when the check finds that kind of problem, and test and install do not run.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DIST_ARTIFACT: ${{ inputs.dist-artifact || 'publish-gates-dist' }}
+
+jobs:
+  build:
+    if: inputs.dist-artifact == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: uv build --out-dir "$GITHUB_WORKSPACE/dist"
+        working-directory: ${{ inputs.package-dir }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: publish-gates-dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    if: inputs.expect-leak == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: uv sync --locked
+        working-directory: ${{ inputs.package-dir }}
+      - run: ${{ inputs.test-command }}
+        working-directory: ${{ inputs.package-dir }}
+
+  leak:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result != 'failure' }}
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.DIST_ARTIFACT }}
+          path: dist
+      - name: Install gitleaks (pinned, checksum checked)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: Unpack the sdist and wheel
+        shell: python
+        run: |
+          import pathlib, tarfile, zipfile
+          out = pathlib.Path("unpacked")
+          # uv build writes a .gitignore into its output folder
+          files = sorted(f for f in pathlib.Path("dist").iterdir() if f.name != ".gitignore")
+          if not files:
+              raise SystemExit("no files in the dist artifact")
+          for f in files:
+              if f.suffix == ".whl":
+                  zipfile.ZipFile(f).extractall(out / f.name)
+              elif f.name.endswith(".tar.gz"):
+                  with tarfile.open(f) as t:
+                      t.extractall(out / f.name, filter="data")
+              else:
+                  raise SystemExit(f"unexpected file in dist: {f.name}")
+          print(f"unpacked {len(files)} file(s): {', '.join(f.name for f in files)}")
+      - name: Secrets in the files (gitleaks)
+        run: |
+          "$RUNNER_TEMP/gitleaks" dir unpacked --no-banner --redact --exit-code 0 \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json"
+      - name: Names, sizes, home-folder paths and the gitleaks report
+        shell: python
+        env:
+          MAX_FILE_MB: ${{ inputs.max-file-mb }}
+          PATH_ALLOWLIST: ${{ inputs.path-allowlist }}
+          EXPECT_LEAK: ${{ inputs.expect-leak }}
+        run: |
+          import fnmatch, json, os, pathlib, re
+          # Paths and rule names only: a matched value is never printed.
+          names = [".env", ".env.*", ".credentials.json", ".claude.json", "auth.json",
+                   "oauth_creds.json", ".pypirc", ".netrc", "*.pem", "*.key", "*.p12", "*.pfx",
+                   "id_rsa*", "id_ed25519*"]
+          home = re.compile(r"[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[^\\/\s\"'<>]+|/home/[^/\s\"'<>]+|/Users/[^/\s\"'<>]+")
+          allow = [a.strip() for a in os.environ["PATH_ALLOWLIST"].splitlines() if a.strip()]
+          limit = float(os.environ["MAX_FILE_MB"]) * 1024 * 1024
+          root = pathlib.Path("unpacked")
+          found = []
+          for path in sorted(p for p in root.rglob("*") if p.is_file()):
+              rel = path.relative_to(root).as_posix()
+              if any(fnmatch.fnmatch(path.name, n) for n in names):
+                  found.append(("name", rel, "credential file name"))
+              if path.stat().st_size > limit:
+                  found.append(("name", rel, f"larger than {os.environ['MAX_FILE_MB']} MB"))
+              data = path.read_bytes()
+              if b"\0" in data[:8192]:
+                  continue
+              hits = [m for m in home.findall(data.decode("utf-8", "replace"))
+                      if not any(a in m for a in allow)]
+              if hits:
+                  found.append(("path", rel, f"{len(hits)} home-folder path(s)"))
+          report = pathlib.Path(os.environ["RUNNER_TEMP"], "gitleaks.json")
+          for leak in json.loads(report.read_text(encoding="utf-8") or "[]"):
+              found.append(("key", pathlib.Path(leak["File"]).relative_to(root).as_posix(), leak["RuleID"]))
+          for kind, rel, why in found:
+              print(f"{kind}: {rel}: {why}")
+          expect = os.environ["EXPECT_LEAK"]
+          if expect:
+              if any(kind == expect for kind, _, _ in found):
+                  print(f"self-test: the check found the planted {expect} problem, as it should")
+              else:
+                  raise SystemExit(f"self-test: the planted {expect} problem was not found")
+          elif found:
+              raise SystemExit(f"{len(found)} problem(s) in the release files; nothing is uploaded")
+          else:
+              print("no credential names, oversized files, home-folder paths or secrets")
+
+  install:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result != 'failure' && inputs.expect-leak == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ inputs.python-version }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.DIST_ARTIFACT }}
+          path: ${{ runner.temp }}/dist
+      - name: Expected version (the tag, or pyproject off a tag)
+        id: expected
+        working-directory: ${{ inputs.package-dir }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the wheel alone and import it
+        working-directory: ${{ runner.temp }}
+        env:
+          IMPORT_NAME: ${{ inputs.import-name }}
+          EXPECTED: ${{ steps.expected.outputs.version }}
+          SMOKE: ${{ inputs.smoke }}
+          CHECK: |
+            import importlib, importlib.metadata, os, sys
+            module = importlib.import_module(os.environ["IMPORT_NAME"])
+            version = importlib.metadata.version(sys.argv[1])
+            print(f"imported {module.__name__} from {module.__file__}, version {version}")
+            if version != os.environ["EXPECTED"]:
+                raise SystemExit(f"installed version {version} != expected {os.environ['EXPECTED']}")
+        run: |
+          set -euo pipefail
+          uv venv --quiet gates-venv
+          wheel=$(ls dist/*.whl)
+          VIRTUAL_ENV="$PWD/gates-venv" uv pip install --quiet "$wheel"
+          source gates-venv/bin/activate
+          python -c "$CHECK" "$(basename "$wheel" | cut -d- -f1)"
+          if [ -n "$SMOKE" ]; then bash -c "$SMOKE"; fi

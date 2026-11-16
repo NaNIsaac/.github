@@ -1,0 +1,13 @@
+[project]
+name = "gates-demo"
+version = "0.1.0"
+description = "Fixture package for the publish-gates self-test"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=9.0"]
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"

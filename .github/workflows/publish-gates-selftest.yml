@@ -1,0 +1,103 @@
+# Proves publish-gates.yml on the fixture package in tests/fixtures/gates_demo before any repo
+# calls it: the clean build passes all three checks, and builds with a credential file name, a
+# key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
+# job, so the run stays green only when each problem is caught). Nothing key-shaped is stored in
+# the repository: the planted key is random and made in the prep job.
+name: publish-gates-selftest
+on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-gates*.yml
+      - tests/fixtures/gates_demo/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-gates*.yml
+      - tests/fixtures/gates_demo/**
+  workflow_dispatch:
+
+concurrency:
+  group: publish-gates-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv build --out-dir "$GITHUB_WORKSPACE/clean"
+        working-directory: tests/fixtures/gates_demo
+      - name: Plant one problem per copy of the wheel
+        shell: python
+        run: |
+          import pathlib, secrets, shutil, string, zipfile
+          alphabet = string.ascii_letters + string.digits
+          plants = {
+              "name": ("gates_demo/.env", "DEMO=1\n"),
+              "key": ("gates_demo/settings.py",
+                      'TOKEN = "ghp_' + "".join(secrets.choice(alphabet) for _ in range(36)) + '"\n'),
+              "path": ("gates_demo/where.txt", "/" + "home/" + "builder/cache\n"),
+          }
+          for kind, (member, text) in plants.items():
+              out = pathlib.Path(f"bad-{kind}")
+              shutil.copytree("clean", out)
+              wheel = next(out.glob("*.whl"))
+              with zipfile.ZipFile(wheel, "a") as z:
+                  z.writestr(member, text)
+              print(f"bad-{kind}: added {member}")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-clean
+          path: clean/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-bad-name
+          path: bad-name/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-bad-key
+          path: bad-key/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-bad-path
+          path: bad-path/
+
+  clean:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-clean
+      smoke: python -m gates_demo
+
+  bad-name:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-name
+      expect-leak: name
+
+  bad-key:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-key
+      expect-leak: key
+
+  bad-path:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      import-name: gates_demo
+      package-dir: tests/fixtures/gates_demo
+      dist-artifact: gates-bad-path
+      expect-leak: path
