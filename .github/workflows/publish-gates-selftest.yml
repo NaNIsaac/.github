@@ -2,7 +2,9 @@
 # calls it: the gates build the fixture and pass all checks as a real repo's call does, the same
 # clean build made in prep passes too, and builds with a credential file name, a
 # key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
-# job, so the run stays green only when each problem is caught).
+# job, so the run stays green only when each problem is caught). The leak-only-* jobs run the
+# leak job alone on artifacts matched by a pattern: a clean one passes, a key in the second of two
+# merged artifacts is found, and a pattern that matches nothing fails (expect-leak: empty).
 # tag-version runs the install job's expected-version step for v and prefixed tags, a tag
 # without the prefix (must fail) and a branch run. The path-* jobs check
 # path-allowlist on the planted home folder: the folder itself passes, a prefix of it is another
@@ -88,6 +90,37 @@ jobs:
         with:
           name: gates-allow
           path: allow/
+      # One package in two artifacts, as a maturin or cibuildwheel matrix uploads it
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-split-sdist
+          path: clean/*.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gates-split-wheel
+          path: bad-key/*.whl
+
+  leak-only-clean:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      leak-only-artifacts: gates-clean
+
+  # The key is in the wheel artifact only, so finding it proves both artifacts were merged and
+  # gitleaks ran in this mode
+  leak-only-merged:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      leak-only-artifacts: gates-split-*
+      expect-leak: key
+
+  leak-only-none:
+    needs: prep
+    uses: ./.github/workflows/publish-gates.yml
+    with:
+      leak-only-artifacts: gates-none-*
+      expect-leak: empty
 
   # The path a real repo takes: the gates build the fixture themselves and pass publish-gates-dist on.
   built:

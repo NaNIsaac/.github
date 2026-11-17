@@ -19,6 +19,10 @@
 # sha, not @main, so a change here never alters a repo's gates unseen.
 # The checker code is inline: a called workflow cannot check out its own repository at its own
 # commit without an OIDC token, and these jobs get no id-token.
+# The home-folder search skips files with a NUL byte in their first 8 KB (compiled .so, .pyd,
+# executables), so a green leak job does not cover paths inside binaries.
+# leak-only-artifacts checks files the caller built itself (maturin, cibuildwheel) with the leak
+# job alone, gitleaks included; build, test and install do not run.
 # path-allowlist names whole home folders (/home/me, C:\Users\you) used as placeholders in docs;
 # a path is excused only when its home folder equals an entry, so an entry never covers a longer
 # user name that starts the same way.
@@ -31,9 +35,9 @@ on:
   workflow_call:
     inputs:
       import-name:
-        description: Module the install check imports.
-        required: true
+        description: Module the install check imports; not needed with leak-only-artifacts.
         type: string
+        default: ""
       package-dir:
         description: Folder with the pyproject.toml, relative to the repository root.
         type: string
@@ -75,6 +79,13 @@ on:
           git-deai-v0.3.0 with tag-prefix git-deai-v. A tag without the prefix fails the install job.
         type: string
         default: v
+      leak-only-artifacts:
+        description: >-
+          Leak-only mode for packages built by the caller (maturin, cibuildwheel): a pattern for
+          the calling run's artifacts, downloaded into one folder. Only the leak job runs, gitleaks
+          included; build, test and install are skipped. A pattern that matches no files fails.
+        type: string
+        default: ""
       dist-artifact:
         description: Check this artifact of the calling run instead of building (publish-gates-selftest.yml).
         type: string
@@ -82,7 +93,7 @@ on:
       expect-leak:
         description: >-
           For publish-gates-selftest.yml only: name, key, path or allow (a leak-allow entry that
-          is malformed or matched nothing). The leak job then passes only
+          is malformed or matched nothing), or empty (no files to check). The leak job then passes only
           when the check finds that kind of problem, and test and install do not run.
         type: string
         default: ""
@@ -95,7 +106,7 @@ env:
 
 jobs:
   build:
-    if: inputs.dist-artifact == ''
+    if: inputs.dist-artifact == '' && inputs.leak-only-artifacts == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +122,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    if: inputs.expect-leak == ''
+    if: inputs.expect-leak == '' && inputs.leak-only-artifacts == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -132,8 +143,15 @@ jobs:
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
       - uses: actions/download-artifact@v8
+        if: inputs.leak-only-artifacts == ''
         with:
           name: ${{ env.DIST_ARTIFACT }}
+          path: dist
+      - uses: actions/download-artifact@v8
+        if: inputs.leak-only-artifacts != ''
+        with:
+          pattern: ${{ inputs.leak-only-artifacts }}
+          merge-multiple: true
           path: dist
       - name: Install gitleaks (pinned, checksum checked)
         run: |
@@ -144,14 +162,25 @@ jobs:
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
       - name: Unpack the sdist and wheel
+        id: unpack
         shell: python
+        env:
+          EXPECT_LEAK: ${{ inputs.expect-leak }}
         run: |
-          import pathlib, tarfile, zipfile
+          import os, pathlib, tarfile, zipfile
           out = pathlib.Path("unpacked")
+          dist = pathlib.Path("dist")
           # uv build writes a .gitignore into its output folder
-          files = sorted(f for f in pathlib.Path("dist").iterdir() if f.name != ".gitignore")
+          files = sorted(f for f in dist.iterdir() if f.name != ".gitignore") if dist.is_dir() else []
+          if not files and os.environ["EXPECT_LEAK"] == "empty":
+              print("self-test: no files to check, and the job stops here, as it should")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  output.write("empty=true\n")
+              raise SystemExit(0)
           if not files:
-              raise SystemExit("no files in the dist artifact")
+              raise SystemExit("no files in the dist artifact or the leak-only-artifacts pattern")
+          if os.environ["EXPECT_LEAK"] == "empty":
+              raise SystemExit("self-test: expected no files, found " + ", ".join(f.name for f in files))
           for f in files:
               if f.suffix == ".whl":
                   zipfile.ZipFile(f).extractall(out / f.name)
@@ -162,10 +191,12 @@ jobs:
                   raise SystemExit(f"unexpected file in dist: {f.name}")
           print(f"unpacked {len(files)} file(s): {', '.join(f.name for f in files)}")
       - name: Secrets in the files (gitleaks)
+        if: steps.unpack.outputs.empty != 'true'
         run: |
           "$RUNNER_TEMP/gitleaks" dir unpacked --no-banner --redact --exit-code 0 \
             --report-format json --report-path "$RUNNER_TEMP/gitleaks.json"
       - name: Names, sizes, home-folder paths and the gitleaks report
+        if: steps.unpack.outputs.empty != 'true'
         shell: python
         env:
           MAX_FILE_MB: ${{ inputs.max-file-mb }}
@@ -253,7 +284,7 @@ jobs:
 
   install:
     needs: build
-    if: ${{ !cancelled() && needs.build.result != 'failure' && inputs.expect-leak == '' }}
+    if: ${{ !cancelled() && needs.build.result != 'failure' && inputs.expect-leak == '' && inputs.leak-only-artifacts == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
