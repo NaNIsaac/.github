@@ -2,7 +2,9 @@
 # calls it: the gates build the fixture and pass all checks as a real repo's call does, the same
 # clean build made in prep passes too, and builds with a credential file name, a
 # key and a home-folder path planted at run time fail the leak check (expect-leak inverts that one
-# job, so the run stays green only when each problem is caught). The path-* jobs check
+# job, so the run stays green only when each problem is caught).
+# tag-version runs the install job's expected-version step for v and prefixed tags, a tag
+# without the prefix (must fail) and a branch run. The path-* jobs check
 # path-allowlist on the planted home folder: the folder itself passes, a prefix of it is another
 # folder and fails, and an entry deeper than a home folder is refused. The allow-* jobs check leak-allow
 # on a build with one key in gates_demo/patterns.py: the right entry and count pass it; no entry,
@@ -130,6 +132,38 @@ jobs:
       package-dir: tests/fixtures/gates_demo
       dist-artifact: gates-bad-path
       expect-leak: path
+
+  # The expected-version step on its own, for tags a pull request run cannot have
+  tag-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Run the step for each ref
+        shell: uv run --no-project --with pyyaml python {0}
+        run: |
+          import os, pathlib, subprocess, tempfile, yaml
+          gates = yaml.safe_load(pathlib.Path(".github/workflows/publish-gates.yml").read_text(encoding="utf-8"))
+          step = next(s for s in gates["jobs"]["install"]["steps"] if s.get("id") == "expected")
+          # ref type, ref name, tag-prefix, the version the step must give (None: it must fail)
+          cases = [
+              ("tag", "v0.1.0", "v", "0.1.0"),
+              ("tag", "gates-demo-v0.1.0", "gates-demo-v", "0.1.0"),
+              ("tag", "gates-demo-v0.1.0", "v", None),
+              ("tag", "v0.1.0", "gates-demo-v", None),
+              ("branch", "main", "gates-demo-v", "0.1.0"),
+          ]
+          failed = 0
+          for ref_type, ref_name, prefix, want in cases:
+              out = pathlib.Path(tempfile.mkstemp()[1])
+              env = {**os.environ, "GITHUB_REF_TYPE": ref_type, "GITHUB_REF_NAME": ref_name,
+                     "TAG_PREFIX": prefix, "GITHUB_OUTPUT": str(out)}
+              run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd="tests/fixtures/gates_demo", env=env)
+              got = out.read_text().partition("version=")[2].strip() if run.returncode == 0 else None
+              failed += got != want
+              print(f"{'ok' if got == want else 'FAIL'}: {ref_type} {ref_name}, tag-prefix {prefix}: {got}")
+          if failed:
+              raise SystemExit(f"{failed} case(s) gave the wrong version")
 
   path-allowed:
     needs: prep
