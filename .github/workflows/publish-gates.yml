@@ -69,6 +69,12 @@ on:
           header).
         type: string
         default: ""
+      tag-prefix:
+        description: >-
+          On a tag run, the tag is this prefix followed by the version the wheel must have, as in
+          git-deai-v0.3.0 with tag-prefix git-deai-v. A tag without the prefix fails the install job.
+        type: string
+        default: v
       dist-artifact:
         description: Check this artifact of the calling run instead of building (publish-gates-selftest.yml).
         type: string
@@ -261,9 +267,14 @@ jobs:
       - name: Expected version (the tag, or pyproject off a tag)
         id: expected
         working-directory: ${{ inputs.package-dir }}
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            case "$GITHUB_REF_NAME" in
+              "$TAG_PREFIX"*) echo "version=${GITHUB_REF_NAME#"$TAG_PREFIX"}" >> "$GITHUB_OUTPUT" ;;
+              *) echo "tag $GITHUB_REF_NAME does not start with tag-prefix $TAG_PREFIX" >&2; exit 1 ;;
+            esac
           else
             echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
           fi
