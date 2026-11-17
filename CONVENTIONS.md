@@ -43,7 +43,7 @@ integration branch only adds a place for work to go stale.
 
 ## Comments and GitHub text
 
-- Code comments, docstrings, commit messages, pull requests, issues and review comments are in English. The exceptions are `README.ko.md` and repos whose subject is the Korean language (`hangeul`, `hanfix`). (Korean in comments and docstrings checked, outside those repos)
+- English is the default for code comments, docstrings, commit messages, pull requests, issues and review comments, used whenever nothing says otherwise. Korean has `README.ko.md` and the repos whose subject is the Korean language (`hangeul`, `hanfix`). The owner can order another language for any repo or file at any time, and that order wins; the repo records it in `.conventions.toml`. (Korean in comments and docstrings checked, outside those repos)
 - A comment says why, which the code cannot. No numbered step comments (`# 1.`, `# Step 2:`), no section banners (`# ---- Load ----`), no comment that restates the line below, no `Note:` or `Important:` emphasis. (step, banner and `Note:`/`Important:` comments checked in Python, PowerShell, shell and C-like sources)
 - A file you touch loses such comments; deleting is the default, translating only what still earns its place.
 
@@ -56,7 +56,7 @@ integration branch only adds a place for work to go stale.
   into docs/, with links from the Documentation section.
 - Install and first-run steps come first, in order, as code blocks. Each block a new user should run is marked with `<!-- test -->` (or `windows`, `unix`, `console`) on the line before it. (checked)
 - CI runs the marked blocks on Linux, macOS and Windows by calling the shared workflow: `uses: NaNIsaac/.github/.github/workflows/readme.yml@main`. (checked) A repository whose README installs from the private tendlane repository adds `secrets: inherit`, which gives the workflow the `TENDLANE_READ_TOKEN` it reads that repository with.
-- `README.md` is English and `README.ko.md` mirrors it, marks included.
+- `README.md` is in English by default and `README.ko.md` mirrors it, marks included. A repo whose `README.md` the owner ordered in another language records that as `readme-language` under `[exempt]` (below).
 - Start docs/ with index.md (Overview), install.md, tutorial.md, guides/ and a changelog link.
   The documentation hub generates the API reference; do not maintain a second hand-written API.
 - `docs/index.md` is the overview source. Below the README introduction, keep one generated
@@ -100,4 +100,4 @@ Private repositories get 2,000 included minutes a month, where a Windows minute 
 
   `ci-concurrency` and `ci-macos` excuse the two CI cost rules.
   `readme-structure`, `readme-length` and `docs-navigation` excuse the documentation pilot rules.
-  `readme-tests` covers the setup steps (not tested, not run in CI); `readme-language` covers an English `README.md`. The build backend keeps its own declaration, `[tool.conventions] build-backend` in `pyproject.toml`.
+  `readme-tests` covers the setup steps (not tested, not run in CI); `readme-language` excuses a `README.md` that is not in English (a Korean-language project, or an owner order). The build backend keeps its own declaration, `[tool.conventions] build-backend` in `pyproject.toml`.
